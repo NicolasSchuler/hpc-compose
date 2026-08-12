@@ -9,13 +9,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::ResourceProfile;
 use crate::domain::{MountParts, resolve_node_index_expr, split_mount_parts};
-use crate::readiness_util::readiness_uses_implicit_localhost;
+use crate::readiness_analysis::readiness_uses_implicit_localhost;
 use crate::spec::{
     CommandSpec, ComposeSpec, DependencyCondition, PrepareSpec, ReadinessSpec, RuntimeBackend,
     RuntimeConfig, ServiceAssertSpec, ServiceDependency, ServiceFailureMode, ServiceFailurePolicy,
     ServiceSlurmConfig, SlurmConfig, gres_gpu_count,
 };
-
+use crate::spec_error::mark_spec_validation_error;
 use crate::tracked_paths::JOB_CONTAINER_DIR;
 
 /// Mount destinations that the runtime reserves for itself; user-declared
@@ -179,8 +179,7 @@ pub fn build_plan_with_options(
     // (undefined dependency, missing image, unsatisfiable geometry, ...), so it
     // must classify as an invalid spec (exit 2) exactly like failures at the
     // `ComposeSpec` load boundary, not as a generic exit-1 error.
-    build_plan_with_options_inner(spec_path, spec, options)
-        .map_err(crate::spec::mark_spec_validation_error)
+    build_plan_with_options_inner(spec_path, spec, options).map_err(mark_spec_validation_error)
 }
 
 fn build_plan_with_options_inner(
@@ -1126,14 +1125,17 @@ struct ParsedMount<'a> {
 
 impl<'a> ParsedMount<'a> {
     fn parse(mount: &'a str) -> Result<Self> {
+        if mount.contains('\0') {
+            bail!("mount '{mount}' must not contain null bytes");
+        }
         let parsed = match split_mount_parts(mount) {
             MountParts::HostContainer {
                 host,
                 container,
                 mode,
             } => Self {
-                host,
-                container,
+                host: host.trim(),
+                container: container.trim(),
                 mode,
             },
             MountParts::UnsupportedMode(mode) => {
@@ -1143,7 +1145,7 @@ impl<'a> ParsedMount<'a> {
                 bail!("mount '{mount}' must use host_path:container_path[:ro|rw] syntax")
             }
         };
-        if parsed.host.trim().is_empty() || parsed.container.trim().is_empty() {
+        if parsed.host.is_empty() || parsed.container.is_empty() {
             bail!("mount '{mount}' must use non-empty host and container paths");
         }
         if !parsed.container.starts_with('/') {
@@ -1177,13 +1179,7 @@ fn resolve_cache_dir(
 /// Returns a user-facing issue for cache paths that violate cluster policy.
 #[must_use]
 pub fn cache_path_policy_issue(path: &Path) -> Option<String> {
-    if crate::path_util::is_node_local_path(&path.to_string_lossy()) {
-        return Some(format!(
-            "x-slurm.cache_dir resolves to '{}', which is typically node-local and not shared; choose a shared filesystem path instead",
-            path.display()
-        ));
-    }
-    None
+    crate::path_util::cache_path_policy_issue(path)
 }
 
 /// Returns a user-facing issue when a resolved `x-slurm.runtime_root` override
@@ -1193,34 +1189,13 @@ pub fn cache_path_policy_issue(path: &Path) -> Option<String> {
 /// governed by the submission environment.
 #[must_use]
 pub fn runtime_root_policy_issue(path: &Path) -> Option<String> {
-    if crate::path_util::is_node_local_path(&path.to_string_lossy()) {
-        return Some(format!(
-            "x-slurm.runtime_root resolves to '{}', which is typically node-local and not shared; choose a shared filesystem path so per-job logs and state stay visible from compute nodes",
-            path.display()
-        ));
-    }
-    None
+    crate::path_util::runtime_root_policy_issue(path)
 }
 
 /// Extracts the registry hostname used by a remote image reference.
 #[must_use]
 pub fn registry_host_for_remote(remote: &str) -> String {
-    let without_scheme = remote.split("://").nth(1).unwrap_or(remote);
-    if let Some((host, _)) = without_scheme.split_once('#') {
-        return host.to_string();
-    }
-
-    let has_path_component = without_scheme.contains('/');
-    if !has_path_component {
-        return "registry-1.docker.io".to_string();
-    }
-
-    let first = without_scheme.split('/').next().unwrap_or(without_scheme);
-    if first == "localhost" || first.contains('.') || (first.contains(':') && has_path_component) {
-        first.to_string()
-    } else {
-        "registry-1.docker.io".to_string()
-    }
+    crate::domain::registry_host_for_remote(remote)
 }
 
 fn looks_like_local_sqsh(value: &str) -> bool {

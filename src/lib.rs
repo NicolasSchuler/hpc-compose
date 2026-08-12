@@ -47,6 +47,7 @@ pub mod context;
 pub(crate) mod diagnostics;
 pub mod docs_search;
 pub(crate) mod domain;
+pub(crate) mod dotenv;
 pub mod evolve;
 pub mod examples;
 /// Process exit-code propagation for direct-execution commands.
@@ -57,6 +58,7 @@ pub(crate) mod lint;
 pub(crate) mod lint_fix;
 pub(crate) mod lsp;
 pub mod manpages;
+pub(crate) mod memory;
 pub(crate) mod mpi_util;
 pub(crate) mod output;
 pub(crate) mod path_util;
@@ -66,6 +68,8 @@ pub(crate) mod preflight;
 pub mod prepare;
 pub(crate) mod process_probe;
 pub(crate) mod progress;
+#[allow(dead_code)]
+pub(crate) mod readiness_analysis;
 pub(crate) mod readiness_util;
 pub(crate) mod redaction;
 pub mod render;

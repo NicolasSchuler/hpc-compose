@@ -7,7 +7,11 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde_norway::Value;
 
+use crate::dotenv::{DotenvLineError, parse_dotenv_lines};
 use crate::spec_error::SpecError;
+
+#[cfg(test)]
+use crate::dotenv::DotenvLineErrorKind;
 
 pub(super) type InterpolationVars = BTreeMap<String, String>;
 
@@ -240,37 +244,6 @@ fn default_usage_tracking_active() -> bool {
     DEFAULT_USAGE_TRACKER.with(|tracker| tracker.borrow().is_some())
 }
 
-/// The reason a single `.env`/`env_file` line failed the `KEY=VALUE` grammar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DotenvLineErrorKind {
-    /// The line had no `=` separator.
-    MissingEquals,
-    /// The key to the left of `=` was empty.
-    EmptyKey,
-}
-
-impl DotenvLineErrorKind {
-    /// Human-readable reason, reused verbatim by both the `.env` loader message
-    /// and [`SpecError::EnvFileMalformedLine`].
-    pub(super) fn reason(self) -> &'static str {
-        match self {
-            DotenvLineErrorKind::MissingEquals => "must use KEY=VALUE syntax",
-            DotenvLineErrorKind::EmptyKey => "has an empty variable name",
-        }
-    }
-}
-
-/// A path-free parse failure for one dotenv-style line. The caller attaches the
-/// file path (and any framing message) so the same grammar can back the
-/// `.env` loader and the per-service `env_file:` loader.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct DotenvLineError {
-    /// 1-based line number of the offending line.
-    pub(super) line: usize,
-    /// Why the line was rejected.
-    pub(super) kind: DotenvLineErrorKind,
-}
-
 /// Failure modes of [`parse_env_file`]: either the file could not be read, or a
 /// line violated the `KEY=VALUE` grammar. Keeping the two distinct lets the
 /// caller map an I/O failure and a malformed line to different diagnostics.
@@ -279,42 +252,6 @@ pub(super) enum ParseEnvFileError {
     Io(std::io::Error),
     /// A line violated the `KEY=VALUE` grammar.
     Line(DotenvLineError),
-}
-
-/// Parses dotenv-style `KEY=VALUE` lines from an already-read buffer. Handles
-/// blank lines, `#` comments, an optional `export ` prefix, and single/double
-/// quoted values. This is the path-free core shared by the compose `.env`
-/// loader and the per-service `env_file:` loader.
-pub(super) fn parse_dotenv_lines(raw: &str) -> Result<InterpolationVars, DotenvLineError> {
-    let mut vars = BTreeMap::new();
-    for (line_no, line) in raw.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed);
-        let Some((key, value)) = trimmed.split_once('=') else {
-            return Err(DotenvLineError {
-                line: line_no + 1,
-                kind: DotenvLineErrorKind::MissingEquals,
-            });
-        };
-        let key = key.trim();
-        if key.is_empty() {
-            return Err(DotenvLineError {
-                line: line_no + 1,
-                kind: DotenvLineErrorKind::EmptyKey,
-            });
-        }
-        let value = value.trim();
-        let value = if quoted(value, '"') || quoted(value, '\'') {
-            value[1..value.len() - 1].to_string()
-        } else {
-            value.to_string()
-        };
-        vars.insert(key.to_string(), value);
-    }
-    Ok(vars)
 }
 
 /// Reads and parses a dotenv-style file at an explicit path. Existence is *not*
@@ -341,10 +278,6 @@ fn load_dotenv_vars(project_dir: &Path) -> Result<InterpolationVars> {
             error.kind.reason()
         )
     })
-}
-
-fn quoted(value: &str, quote: char) -> bool {
-    value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote)
 }
 
 pub(super) fn interpolate_optional_string(
@@ -639,6 +572,76 @@ mod tests {
             }
             other => panic!("expected a malformed-line error, got {:?}", other.is_ok()),
         }
+    }
+
+    #[test]
+    fn dotenv_parser_preserves_edge_grammar_and_last_value_wins() {
+        let vars = parse_dotenv_lines(concat!(
+            "  # comment with leading whitespace\n",
+            " export EMPTY =   \n",
+            "DUPLICATE=first\n",
+            " DUPLICATE = second \n",
+            "DOUBLE=\"two words\"\n",
+            "SINGLE='one word'\n",
+            "EMPTY_DOUBLE=\"\"\n",
+            "EMPTY_SINGLE=''\n",
+            "UNMATCHED_SINGLE='left\n",
+            "UNMATCHED_DOUBLE=\"right\n",
+            "MISMATCHED_SINGLE='left\"\n",
+            "MISMATCHED_DOUBLE=\"right'\n",
+        ))
+        .expect("dotenv grammar");
+
+        assert_eq!(vars.get("EMPTY").map(String::as_str), Some(""));
+        assert_eq!(vars.get("DUPLICATE").map(String::as_str), Some("second"));
+        assert_eq!(vars.get("DOUBLE").map(String::as_str), Some("two words"));
+        assert_eq!(vars.get("SINGLE").map(String::as_str), Some("one word"));
+        assert_eq!(vars.get("EMPTY_DOUBLE").map(String::as_str), Some(""));
+        assert_eq!(vars.get("EMPTY_SINGLE").map(String::as_str), Some(""));
+        assert_eq!(
+            vars.get("UNMATCHED_SINGLE").map(String::as_str),
+            Some("'left")
+        );
+        assert_eq!(
+            vars.get("UNMATCHED_DOUBLE").map(String::as_str),
+            Some("\"right")
+        );
+        assert_eq!(
+            vars.get("MISMATCHED_SINGLE").map(String::as_str),
+            Some("'left\"")
+        );
+        assert_eq!(
+            vars.get("MISMATCHED_DOUBLE").map(String::as_str),
+            Some("\"right'")
+        );
+    }
+
+    #[test]
+    fn dotenv_loader_reports_exact_line_and_reason() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let path = tmpdir.path().join(".env");
+
+        fs::write(&path, "GOOD=1\n# comment\nBROKEN\n").expect("dotenv");
+        assert_eq!(
+            load_dotenv_vars(tmpdir.path())
+                .expect_err("missing equals")
+                .to_string(),
+            format!(
+                "failed to parse {}: line 3 must use KEY=VALUE syntax",
+                path.display()
+            )
+        );
+
+        fs::write(&path, "GOOD=1\n\n = value\n").expect("dotenv");
+        assert_eq!(
+            load_dotenv_vars(tmpdir.path())
+                .expect_err("empty key")
+                .to_string(),
+            format!(
+                "failed to parse {}: line 3 has an empty variable name",
+                path.display()
+            )
+        );
     }
 
     #[test]

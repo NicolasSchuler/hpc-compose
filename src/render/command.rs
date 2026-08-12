@@ -1,6 +1,5 @@
-use super::{
-    DIST_ENV_NAMES, DIST_SLURM_RANK_ENV_NAMES, distributed_helpers_enabled, service_step_name,
-};
+use super::{DIST_ENV_NAMES, DIST_SLURM_RANK_ENV_NAMES, distributed_helpers_enabled};
+use crate::domain::service_step_name;
 use crate::planner::ExecutionSpec;
 use crate::runtime_plan::RuntimeService;
 use crate::spec::RuntimeBackend;

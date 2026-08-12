@@ -28,6 +28,15 @@ pub(crate) const STATE_FILE_NAME: &str = "state.json";
 pub(crate) const ALLOCATION_DIR_NAME: &str = "allocation";
 pub(crate) const PRIMARY_NODE_FILE_NAME: &str = "primary_node";
 pub(crate) const NODELIST_FILE_NAME: &str = "nodes.txt";
+/// Legacy nodelist filename used only when bootstrapping inside an active
+/// allocation.
+///
+/// This predates the tracked runtime allocation layout, whose canonical
+/// expanded nodelist uses [`NODELIST_FILE_NAME`] (`nodes.txt`). Keep the two
+/// names distinct so active-allocation `HPC_COMPOSE_NODELIST_FILE` remains
+/// byte-for-byte compatible with existing workflows.
+#[allow(dead_code)]
+pub(crate) const LEGACY_ACTIVE_ALLOCATION_NODELIST_FILE_NAME: &str = "nodelist";
 pub(crate) const RESUME_METADATA_DIR_NAME: &str = "_hpc-compose";
 pub(crate) const SERVICE_EXITS_DIR_NAME: &str = "service-exits";
 pub(crate) const HOOKS_DIR_NAME: &str = "hooks";
@@ -80,6 +89,12 @@ pub(crate) fn is_under_job_container_dir(path: &str) -> bool {
 pub(crate) fn under_job_container_dir(sub: &str) -> String {
     let trimmed = sub.trim_start_matches('/');
     format!("{JOB_CONTAINER_DIR}/{trimmed}")
+}
+
+/// Converts a service name into the tracked log file name used on disk.
+#[must_use]
+pub(crate) fn log_file_name_for_service(value: &str) -> String {
+    format!("{}.log", crate::domain::service_token(value))
 }
 
 #[must_use]
@@ -299,6 +314,10 @@ mod tests {
         assert_eq!(under_job_container_dir("hooks"), "/hpc-compose/job/hooks");
         assert_eq!(under_job_container_dir("/hooks"), "/hpc-compose/job/hooks");
         assert_eq!(under_job_container_dir("///a/b"), "/hpc-compose/job/a/b");
+        assert_eq!(
+            log_file_name_for_service("svc/name.with spaces"),
+            "svc_x2f_name_x2e_with_x20_spaces.log"
+        );
     }
 
     #[test]
@@ -394,6 +413,16 @@ mod tests {
         assert_eq!(
             artifact_payload_dir(&latest_artifacts_dir(&job_root)),
             Path::new("/submit/.hpc-compose/12345/artifacts/payload")
+        );
+    }
+
+    #[test]
+    fn active_allocation_nodelist_filename_remains_legacy_and_distinct() {
+        assert_eq!(LEGACY_ACTIVE_ALLOCATION_NODELIST_FILE_NAME, "nodelist");
+        assert_eq!(NODELIST_FILE_NAME, "nodes.txt");
+        assert_ne!(
+            LEGACY_ACTIVE_ALLOCATION_NODELIST_FILE_NAME,
+            NODELIST_FILE_NAME
         );
     }
 }

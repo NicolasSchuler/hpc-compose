@@ -341,6 +341,58 @@ fn read_only_volume_mode_is_preserved() {
 }
 
 #[test]
+fn mount_whitespace_is_normalized_consistently_between_validation_and_planning() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = tmpdir.path().join("compose.yaml");
+    std::fs::write(&compose, "services: {}\n").expect("write");
+
+    let spec_with_mount = |mount: &str| ComposeSpec {
+        secrets: BTreeMap::new(),
+        runtime: RuntimeConfig::default(),
+        name: Some("demo".into()),
+        slurm: SlurmConfig::default(),
+        software_env: crate::spec::SoftwareEnvConfig::default(),
+        sweep: None,
+        services: BTreeMap::from([(
+            "app".into(),
+            ServiceSpec {
+                volumes: vec![mount.into()],
+                ..service("redis:7")
+            },
+        )]),
+    };
+
+    let preserved = " ./data :/workspace/data ";
+    let mut validation_copy = spec_with_mount(preserved);
+    validation_copy
+        .validate()
+        .expect("validation trims components for its checks");
+    let plan = build_plan(&compose, spec_with_mount(preserved)).expect("plan mount");
+    assert_eq!(
+        plan.ordered_services[0].volumes,
+        vec![format!(
+            "{}/data:/workspace/data",
+            plan.project_dir.display()
+        )]
+    );
+
+    let leading_container_whitespace = "./data: /workspace/data";
+    let mut validation_copy = spec_with_mount(leading_container_whitespace);
+    validation_copy
+        .validate()
+        .expect("validation accepts a trimmed absolute container path");
+    let plan = build_plan(&compose, spec_with_mount(leading_container_whitespace))
+        .expect("planner uses the same trimmed mount components as validation");
+    assert_eq!(
+        plan.ordered_services[0].volumes,
+        vec![format!(
+            "{}/data:/workspace/data",
+            plan.project_dir.display()
+        )]
+    );
+}
+
+#[test]
 fn build_execution_rejects_ambiguous_mixed_forms() {
     let result = build_execution(
         Some(&CommandSpec::Vec(vec!["/bin/app".into()])),
@@ -482,16 +534,26 @@ fn build_plan_rejects_reserved_runtime_mount_destination() {
 
 #[test]
 fn cache_dir_policy_flags_tmp() {
-    let issue = cache_path_policy_issue(Path::new("/tmp/hpc-compose")).expect("issue");
-    assert!(issue.contains("not shared"));
+    assert_eq!(
+        cache_path_policy_issue(Path::new("/tmp/hpc-compose")),
+        Some(
+            "x-slurm.cache_dir resolves to '/tmp/hpc-compose', which is typically node-local and not shared; choose a shared filesystem path instead"
+                .to_string()
+        )
+    );
+    assert_eq!(cache_path_policy_issue(Path::new("/shared/cache")), None);
 }
 
 #[test]
 fn runtime_root_policy_flags_node_local_override() {
-    let issue = runtime_root_policy_issue(Path::new("/tmp/runs")).expect("issue");
-    assert!(issue.contains("not shared"));
-    assert!(issue.contains("x-slurm.runtime_root"));
-    assert!(runtime_root_policy_issue(Path::new("/shared/runs")).is_none());
+    assert_eq!(
+        runtime_root_policy_issue(Path::new("/tmp/runs")),
+        Some(
+            "x-slurm.runtime_root resolves to '/tmp/runs', which is typically node-local and not shared; choose a shared filesystem path so per-job logs and state stay visible from compute nodes"
+                .to_string()
+        )
+    );
+    assert_eq!(runtime_root_policy_issue(Path::new("/shared/runs")), None);
 }
 
 #[test]
@@ -1945,6 +2007,60 @@ fn build_plan_rejects_distributed_readiness_with_localhost_semantics() {
 }
 
 #[test]
+fn distributed_http_readiness_uses_current_authority_classifier() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = tmpdir.path().join("compose.yaml");
+    std::fs::write(&compose, "services: {}\n").expect("write");
+
+    let spec_for_url = |url: &str| ComposeSpec {
+        secrets: BTreeMap::new(),
+        runtime: RuntimeConfig::default(),
+        name: Some("demo".into()),
+        slurm: SlurmConfig {
+            nodes: Some(2),
+            ..SlurmConfig::default()
+        },
+        software_env: crate::spec::SoftwareEnvConfig::default(),
+        sweep: None,
+        services: BTreeMap::from([(
+            "app".into(),
+            ServiceSpec {
+                readiness: Some(ReadinessSpec::Http {
+                    url: url.into(),
+                    status_code: 200,
+                    timeout_seconds: None,
+                }),
+                ..service("redis:7")
+            },
+        )]),
+    };
+
+    for url in [
+        "http://[::1]:8080/health",
+        "http:///health",
+        "http://[::1",
+        "http://[::1]trailing:8080/health",
+    ] {
+        let err = build_plan(&compose, spec_for_url(url))
+            .expect_err("authority classifies as localhost semantics");
+        assert_eq!(
+            err.to_string(),
+            "service 'app' uses readiness that relies on localhost semantics, but its placement is not confined to the allocation primary node; use sleep/log readiness or explicit non-local hosts"
+        );
+    }
+
+    for url in [
+        "http://[2001:db8::1]:8080/health",
+        "http://[]:8080/health",
+        "http://:8080/health",
+    ] {
+        build_plan(&compose, spec_for_url(url)).unwrap_or_else(|err| {
+            panic!("authority should classify as non-local for {url}: {err}")
+        });
+    }
+}
+
+#[test]
 fn build_plan_rejects_non_primary_placement_readiness_with_localhost_semantics() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = tmpdir.path().join("compose.yaml");
@@ -2741,6 +2857,82 @@ fn mount_rejects_unsupported_mode() {
         msg.contains("unsupported mode") && msg.contains("use ro or rw"),
         "unexpected: {msg}"
     );
+}
+
+#[test]
+fn prepare_mount_errors_preserve_planner_diagnostics() {
+    let cases = [
+        (
+            "./data:/data:rx",
+            "mount './data:/data:rx' uses unsupported mode 'rx'; use ro or rw",
+        ),
+        (
+            "./data:relative/path",
+            "mount './data:relative/path' container path must be absolute",
+        ),
+        (
+            " :/data",
+            "mount ' :/data' must use non-empty host and container paths",
+        ),
+        (
+            "./data: ",
+            "mount './data: ' must use non-empty host and container paths",
+        ),
+    ];
+
+    for (mount, expected) in cases {
+        let err = build_prepare_plan(
+            PrepareSpec {
+                commands: vec!["echo prepare".into()],
+                mounts: vec![mount.into()],
+                env: EnvironmentSpec::None,
+                root: false,
+            },
+            Path::new("/tmp/project"),
+            "svc",
+            "x-runtime.prepare",
+        )
+        .expect_err("invalid prepare mount");
+        assert_eq!(err.to_string(), expected);
+    }
+}
+
+#[test]
+fn prepare_mounts_defensively_reject_nul_bytes() {
+    let err = build_prepare_plan(
+        PrepareSpec {
+            commands: vec!["echo prepare".into()],
+            mounts: vec!["./da\0ta:/workspace/da\0ta".into()],
+            env: EnvironmentSpec::None,
+            root: false,
+        },
+        Path::new("/tmp/project"),
+        "svc",
+        "x-runtime.prepare",
+    )
+    .expect_err("prepare mount NUL must be rejected even after spec validation");
+    assert_eq!(
+        err.to_string(),
+        "mount './da\0ta:/workspace/da\0ta' must not contain null bytes"
+    );
+}
+
+#[test]
+fn prepare_mount_whitespace_is_normalized() {
+    let prepare = build_prepare_plan(
+        PrepareSpec {
+            commands: vec!["echo prepare".into()],
+            mounts: vec![" ./data : /workspace/data ".into()],
+            env: EnvironmentSpec::None,
+            root: false,
+        },
+        Path::new("/tmp/project"),
+        "svc",
+        "x-runtime.prepare",
+    )
+    .expect("whitespace-normalized prepare mount");
+
+    assert_eq!(prepare.mounts, vec!["/tmp/project/data:/workspace/data"]);
 }
 
 #[test]

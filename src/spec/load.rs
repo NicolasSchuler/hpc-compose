@@ -6,17 +6,7 @@ use anyhow::Result;
 use super::interpolate::interpolation_vars;
 use super::parse::{load_raw_spec, load_raw_spec_from_str, load_standalone_raw_spec_from_str};
 use super::{ComposeSpec, SecretSpec, SweepConfig, interpolate_optional_string};
-use crate::spec_error::{SpecError, SpecValidationError};
-
-pub(crate) fn mark_spec_validation_error(error: anyhow::Error) -> anyhow::Error {
-    if error.downcast_ref::<SpecError>().is_some()
-        || error.downcast_ref::<SpecValidationError>().is_some()
-    {
-        error
-    } else {
-        SpecValidationError::new(error).into()
-    }
-}
+use crate::spec_error::mark_spec_validation_error;
 
 impl ComposeSpec {
     /// Loads only the embedded sweep metadata without applying interpolation to

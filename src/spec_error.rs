@@ -14,6 +14,16 @@ impl SpecValidationError {
     }
 }
 
+pub(crate) fn mark_spec_validation_error(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<SpecError>().is_some()
+        || error.downcast_ref::<SpecValidationError>().is_some()
+    {
+        error
+    } else {
+        SpecValidationError::new(error).into()
+    }
+}
+
 #[derive(Debug, miette::Diagnostic, thiserror::Error)]
 pub(crate) enum SpecError {
     #[error("spec must contain a top-level 'services' or 'steps' mapping")]
@@ -414,6 +424,42 @@ mod tests {
             path: PathBuf::from("missing.yaml"),
             source: io::Error::new(io::ErrorKind::NotFound, "missing file").into(),
         }
+    }
+
+    #[test]
+    fn mark_spec_validation_error_wraps_generic_errors_transparently() {
+        let error = anyhow::anyhow!("invalid semantic value").context("while validating service");
+        let expected_chain = format!("{error:#}");
+
+        let marked = mark_spec_validation_error(error);
+
+        assert!(marked.downcast_ref::<SpecValidationError>().is_some());
+        assert_eq!(format!("{marked:#}"), expected_chain);
+    }
+
+    #[test]
+    fn mark_spec_validation_error_preserves_specialized_errors() {
+        let error = anyhow::Error::from(SpecError::MissingServices)
+            .context("while loading the compose file");
+        let expected_chain = format!("{error:#}");
+
+        let marked = mark_spec_validation_error(error);
+
+        assert!(marked.downcast_ref::<SpecError>().is_some());
+        assert!(marked.downcast_ref::<SpecValidationError>().is_none());
+        assert_eq!(format!("{marked:#}"), expected_chain);
+    }
+
+    #[test]
+    fn mark_spec_validation_error_is_idempotent() {
+        let marked_once = mark_spec_validation_error(anyhow::anyhow!("invalid placement"))
+            .context("while planning the compose file");
+        let expected_chain = format!("{marked_once:#}");
+
+        let marked_twice = mark_spec_validation_error(marked_once);
+
+        assert!(marked_twice.downcast_ref::<SpecValidationError>().is_some());
+        assert_eq!(format!("{marked_twice:#}"), expected_chain);
     }
 
     #[test]

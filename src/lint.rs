@@ -4,9 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::cluster::ClusterProfile;
 use crate::domain::{MountParts, split_mount_parts};
-use crate::planner::{ImageSource, Plan, cache_path_policy_issue};
-use crate::runtime_plan::RuntimePlan;
-use crate::spec::{DependencyCondition, ScratchScope, ServiceFailureMode, parse_memory_bytes};
+use crate::memory::{format_binary_bytes, parse_memory_bytes};
+use crate::path_util::{cache_path_policy_issue, is_node_local_path};
+use crate::planner::{ImageSource, Plan};
+use crate::runtime_plan::{RuntimePlan, service_allows_configured_scratch};
+use crate::spec::{DependencyCondition, ScratchScope, ServiceFailureMode};
 
 const LOW_MEMORY_PER_CPU_BYTES: u64 = 512 * 1_024 * 1_024;
 const HIGH_MEMORY_PER_CPU_BYTES: u64 = 512 * 1_024 * 1_024 * 1_024;
@@ -224,7 +226,7 @@ fn lint_node_local_volumes(runtime_plan: &RuntimePlan, findings: &mut Vec<LintFi
             let Some((host, _container, _mode)) = split_mount(mount) else {
                 continue;
             };
-            if !crate::path_util::is_node_local_path(host) {
+            if !is_node_local_path(host) {
                 continue;
             }
             findings.push(LintFinding::warning(
@@ -319,7 +321,7 @@ fn lint_memory_cpu_ratio(plan: &Plan, findings: &mut Vec<LintFinding>) {
         (
             format!(
                 "x-slurm.mem='{mem}' gives less than 512 MiB per requested CPU ({})",
-                format_bytes(bytes_per_cpu)
+                format_binary_bytes(bytes_per_cpu)
             ),
             "Increase x-slurm.mem or reduce CPU/task counts if the job is not intentionally memory-light.",
         )
@@ -327,7 +329,7 @@ fn lint_memory_cpu_ratio(plan: &Plan, findings: &mut Vec<LintFinding>) {
         (
             format!(
                 "x-slurm.mem='{mem}' gives more than 512 GiB per requested CPU ({})",
-                format_bytes(bytes_per_cpu)
+                format_binary_bytes(bytes_per_cpu)
             ),
             "Check x-slurm.mem and CPU counts; very high memory-per-CPU requests can queue poorly or violate site policy.",
         )
@@ -509,7 +511,7 @@ fn lint_ignore_shared_writes(
         }
         if let Some(scratch) = &plan.slurm.scratch
             && scratch.scope == ScratchScope::Shared
-            && service_scratch_enabled(service)
+            && service_allows_configured_scratch(service)
         {
             findings.push(LintFinding::warning(
                 "HPC003",
@@ -538,7 +540,7 @@ fn split_mount(value: &str) -> Option<(&str, &str, Option<&str>)> {
 
 fn host_looks_shared(host: &str, shared_roots: &[String]) -> bool {
     if shared_roots.is_empty() {
-        return !crate::path_util::is_node_local_path(host);
+        return !is_node_local_path(host);
     }
     shared_roots.iter().any(|root| path_is_under(host, root))
 }
@@ -547,33 +549,6 @@ fn path_is_under(path: &str, root: &str) -> bool {
     let path = std::path::Path::new(path);
     let root = std::path::Path::new(root);
     path == root || path.starts_with(root)
-}
-
-fn service_scratch_enabled(service: &crate::runtime_plan::RuntimeService) -> bool {
-    service
-        .slurm
-        .scratch
-        .as_ref()
-        .and_then(|scratch| scratch.enabled)
-        .unwrap_or(true)
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = bytes as f64;
-    let mut unit = UNITS[0];
-    for next in UNITS.iter().skip(1) {
-        if value < 1024.0 {
-            break;
-        }
-        value /= 1024.0;
-        unit = next;
-    }
-    if unit == "B" {
-        format!("{bytes} {unit}")
-    } else {
-        format!("{value:.1} {unit}")
-    }
 }
 
 #[cfg(test)]
@@ -586,6 +561,85 @@ mod tests {
         assert_eq!(parse_memory_bytes("1.5G"), Some(1_610_612_736));
         assert_eq!(parse_memory_bytes("2GiB"), Some(2 * 1_024 * 1_024 * 1_024));
         assert_eq!(parse_memory_bytes("4Gc"), None);
+    }
+
+    #[test]
+    fn hpc003_shared_scratch_keeps_global_scope_mode_and_service_gates() {
+        use std::path::PathBuf;
+
+        use crate::planner::{ExecutionSpec, PlannedService, ServicePlacement};
+        use crate::runtime_plan::build_runtime_plan;
+        use crate::spec::{
+            RuntimeConfig, ScratchCleanupPolicy, ScratchConfig, ServiceFailurePolicy,
+            ServiceScratchConfig, ServiceSlurmConfig, SlurmConfig,
+        };
+
+        let failure_policy = ServiceFailurePolicy {
+            mode: ServiceFailureMode::Ignore,
+            ..ServiceFailurePolicy::default()
+        };
+        let service = PlannedService {
+            name: "sidecar".into(),
+            image: ImageSource::Host,
+            execution: ExecutionSpec::ImageDefault,
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            assertions: None,
+            failure_policy,
+            placement: ServicePlacement::default(),
+            slurm: ServiceSlurmConfig::default(),
+            prepare: None,
+        };
+        let mut plan = Plan {
+            name: "scratch-lint".into(),
+            project_dir: PathBuf::from("/project"),
+            spec_path: PathBuf::from("/project/compose.yaml"),
+            runtime: RuntimeConfig::default(),
+            cache_dir: PathBuf::from("/cache"),
+            slurm: SlurmConfig {
+                scratch: Some(ScratchConfig {
+                    scope: ScratchScope::Shared,
+                    base: "/scratch/jobs".into(),
+                    mount: "/scratch".into(),
+                    cleanup: ScratchCleanupPolicy::Always,
+                }),
+                ..SlurmConfig::default()
+            },
+            ordered_services: vec![service],
+        };
+        let scratch_findings = |plan: &Plan| {
+            let runtime_plan = build_runtime_plan(plan);
+            let mut findings = Vec::new();
+            lint_ignore_shared_writes(plan, &runtime_plan, None, &mut findings);
+            findings
+        };
+
+        let findings = scratch_findings(&plan);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].message,
+            "service 'sidecar' ignores failures while shared scratch is enabled"
+        );
+
+        plan.ordered_services[0].slurm.scratch = Some(ServiceScratchConfig {
+            enabled: Some(false),
+        });
+        assert!(scratch_findings(&plan).is_empty());
+
+        plan.ordered_services[0].slurm.scratch = None;
+        plan.slurm.scratch.as_mut().expect("scratch").scope = ScratchScope::NodeLocal;
+        assert!(scratch_findings(&plan).is_empty());
+
+        plan.slurm.scratch.as_mut().expect("scratch").scope = ScratchScope::Shared;
+        plan.ordered_services[0].failure_policy.mode = ServiceFailureMode::FailJob;
+        assert!(scratch_findings(&plan).is_empty());
+
+        plan.ordered_services[0].failure_policy.mode = ServiceFailureMode::Ignore;
+        plan.slurm.scratch = None;
+        assert!(scratch_findings(&plan).is_empty());
     }
 
     #[test]
@@ -730,14 +784,5 @@ mod tests {
         assert_eq!(findings[0].code, "HPC009");
         assert_eq!(findings[0].level, LintLevel::Warning);
         assert!(findings[0].message.contains("megabytes"));
-    }
-
-    #[test]
-    fn format_bytes_keeps_bytes_exact_and_scales_larger_units() {
-        assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1_024), "1.0 KiB");
-        assert_eq!(format_bytes(1_536), "1.5 KiB");
-        assert_eq!(format_bytes(2 * 1_024 * 1_024), "2.0 MiB");
-        assert_eq!(format_bytes(3 * 1_024 * 1_024 * 1_024), "3.0 GiB");
     }
 }

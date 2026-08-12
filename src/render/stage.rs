@@ -8,6 +8,71 @@ pub(super) fn has_hf_stage_in(plan: &RuntimePlan) -> bool {
     plan.slurm.stage_in.iter().any(|entry| entry.hf.is_some())
 }
 
+fn render_scratch_host_path_for_function(out: &mut String) {
+    out.push_str("scratch_host_path_for() {\n");
+    out.push_str("  local path=$1\n");
+    out.push_str("  if [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\" ]]; then\n");
+    out.push_str("    printf '%s' \"$SCRATCH_HOST_PATH\"\n");
+    out.push_str("  elif [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\"/* ]]; then\n");
+    out.push_str(
+        "    printf '%s/%s' \"$SCRATCH_HOST_PATH\" \"${path#\"$SCRATCH_CONTAINER_PATH\"/}\"\n",
+    );
+    out.push_str("  else\n");
+    out.push_str("    printf '%s' \"$path\"\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+}
+
+fn render_stage_copy_path_function(out: &mut String) {
+    out.push_str("stage_copy_path() {\n");
+    out.push_str("  local from=$1\n");
+    out.push_str("  local to=$2\n");
+    out.push_str("  local mode=$3\n");
+    out.push_str("  mkdir -p \"$(dirname \"$to\")\"\n");
+    out.push_str("  if [[ \"$mode\" == \"rsync\" ]]; then\n");
+    out.push_str("    if command -v rsync >/dev/null 2>&1; then\n");
+    out.push_str("      rsync -a \"$from\" \"$to\"\n");
+    out.push_str("    else\n");
+    out.push_str("      cp -R \"$from\" \"$to\"\n");
+    out.push_str("    fi\n");
+    out.push_str("  else\n");
+    out.push_str("    cp -R \"$from\" \"$to\"\n");
+    out.push_str("  fi\n");
+    out.push_str("}\n\n");
+}
+
+fn render_stage_in_paths_on_current_node_function(out: &mut String) {
+    out.push_str("stage_in_paths_on_current_node() {\n");
+    out.push_str("  local i\n");
+    out.push_str("  for i in \"${!STAGE_IN_FROM[@]}\"; do\n");
+    out.push_str("    local from=${STAGE_IN_FROM[i]}\n");
+    out.push_str("    local to\n");
+    out.push_str("    to=$(scratch_host_path_for \"${STAGE_IN_TO[i]}\")\n");
+    out.push_str("    echo \"Staging in $from -> $to\"\n");
+    out.push_str("    stage_copy_path \"$from\" \"$to\" \"${STAGE_IN_MODES[i]}\"\n");
+    out.push_str("  done\n");
+    out.push_str("}\n\n");
+}
+
+fn render_stage_out_paths_on_current_node_function(out: &mut String) {
+    out.push_str("stage_out_paths_on_current_node() {\n");
+    out.push_str("  local exit_code=${1:-0}\n");
+    out.push_str("  local outcome=success\n");
+    out.push_str("  (( exit_code != 0 )) && outcome=failure\n");
+    out.push_str("  local i\n");
+    out.push_str("  for i in \"${!STAGE_OUT_FROM[@]}\"; do\n");
+    out.push_str("    local when=${STAGE_OUT_WHEN[i]}\n");
+    out.push_str("    if [[ \"$when\" == \"on_success\" && \"$outcome\" != \"success\" ]]; then continue; fi\n");
+    out.push_str("    if [[ \"$when\" == \"on_failure\" && \"$outcome\" != \"failure\" ]]; then continue; fi\n");
+    out.push_str("    local from\n");
+    out.push_str("    from=$(scratch_host_path_for \"${STAGE_OUT_FROM[i]}\")\n");
+    out.push_str("    local to=${STAGE_OUT_TO[i]}\n");
+    out.push_str("    echo \"Staging out $from -> $to\"\n");
+    out.push_str("    stage_copy_path \"$from\" \"$to\" \"${STAGE_OUT_MODES[i]}\"\n");
+    out.push_str("  done\n");
+    out.push_str("}\n\n");
+}
+
 pub(super) fn render_stage_helpers(out: &mut String, plan: &RuntimePlan) {
     // Filesystem-path stage-in entries only; `hf://` sources stage via a
     // separate cluster-side download step (see `render_hf_stage_in`).
@@ -83,34 +148,8 @@ pub(super) fn render_stage_helpers(out: &mut String, plan: &RuntimePlan) {
         bash_array_literal(&stage_out_when)
     ));
 
-    out.push_str("scratch_host_path_for() {\n");
-    out.push_str("  local path=$1\n");
-    out.push_str("  if [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\" ]]; then\n");
-    out.push_str("    printf '%s' \"$SCRATCH_HOST_PATH\"\n");
-    out.push_str("  elif [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\"/* ]]; then\n");
-    out.push_str(
-        "    printf '%s/%s' \"$SCRATCH_HOST_PATH\" \"${path#\"$SCRATCH_CONTAINER_PATH\"/}\"\n",
-    );
-    out.push_str("  else\n");
-    out.push_str("    printf '%s' \"$path\"\n");
-    out.push_str("  fi\n");
-    out.push_str("}\n\n");
-
-    out.push_str("stage_copy_path() {\n");
-    out.push_str("  local from=$1\n");
-    out.push_str("  local to=$2\n");
-    out.push_str("  local mode=$3\n");
-    out.push_str("  mkdir -p \"$(dirname \"$to\")\"\n");
-    out.push_str("  if [[ \"$mode\" == \"rsync\" ]]; then\n");
-    out.push_str("    if command -v rsync >/dev/null 2>&1; then\n");
-    out.push_str("      rsync -a \"$from\" \"$to\"\n");
-    out.push_str("    else\n");
-    out.push_str("      cp -R \"$from\" \"$to\"\n");
-    out.push_str("    fi\n");
-    out.push_str("  else\n");
-    out.push_str("    cp -R \"$from\" \"$to\"\n");
-    out.push_str("  fi\n");
-    out.push_str("}\n\n");
+    render_scratch_host_path_for_function(out);
+    render_stage_copy_path_function(out);
 
     out.push_str("scratch_requires_node_fanout() {\n");
     out.push_str("  [[ \"${SCRATCH_SCOPE:-}\" == \"node_local\" ]] || return 1\n");
@@ -131,16 +170,7 @@ pub(super) fn render_stage_helpers(out: &mut String, plan: &RuntimePlan) {
     out.push_str("  fi\n");
     out.push_str("}\n\n");
 
-    out.push_str("stage_in_paths_on_current_node() {\n");
-    out.push_str("  local i\n");
-    out.push_str("  for i in \"${!STAGE_IN_FROM[@]}\"; do\n");
-    out.push_str("    local from=${STAGE_IN_FROM[i]}\n");
-    out.push_str("    local to\n");
-    out.push_str("    to=$(scratch_host_path_for \"${STAGE_IN_TO[i]}\")\n");
-    out.push_str("    echo \"Staging in $from -> $to\"\n");
-    out.push_str("    stage_copy_path \"$from\" \"$to\" \"${STAGE_IN_MODES[i]}\"\n");
-    out.push_str("  done\n");
-    out.push_str("}\n\n");
+    render_stage_in_paths_on_current_node_function(out);
 
     out.push_str("write_stage_in_node_script() {\n");
     out.push_str("  local script_path=\"$JOB_TMP/stage-in-node.sh\"\n");
@@ -161,43 +191,9 @@ pub(super) fn render_stage_helpers(out: &mut String, plan: &RuntimePlan) {
         "STAGE_IN_MODES={}\n\n",
         bash_array_literal(&stage_in_modes)
     ));
-    out.push_str("scratch_host_path_for() {\n");
-    out.push_str("  local path=$1\n");
-    out.push_str("  if [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\" ]]; then\n");
-    out.push_str("    printf '%s' \"$SCRATCH_HOST_PATH\"\n");
-    out.push_str("  elif [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\"/* ]]; then\n");
-    out.push_str(
-        "    printf '%s/%s' \"$SCRATCH_HOST_PATH\" \"${path#\"$SCRATCH_CONTAINER_PATH\"/}\"\n",
-    );
-    out.push_str("  else\n");
-    out.push_str("    printf '%s' \"$path\"\n");
-    out.push_str("  fi\n");
-    out.push_str("}\n\n");
-    out.push_str("stage_copy_path() {\n");
-    out.push_str("  local from=$1\n");
-    out.push_str("  local to=$2\n");
-    out.push_str("  local mode=$3\n");
-    out.push_str("  mkdir -p \"$(dirname \"$to\")\"\n");
-    out.push_str("  if [[ \"$mode\" == \"rsync\" ]]; then\n");
-    out.push_str("    if command -v rsync >/dev/null 2>&1; then\n");
-    out.push_str("      rsync -a \"$from\" \"$to\"\n");
-    out.push_str("    else\n");
-    out.push_str("      cp -R \"$from\" \"$to\"\n");
-    out.push_str("    fi\n");
-    out.push_str("  else\n");
-    out.push_str("    cp -R \"$from\" \"$to\"\n");
-    out.push_str("  fi\n");
-    out.push_str("}\n\n");
-    out.push_str("stage_in_paths_on_current_node() {\n");
-    out.push_str("  local i\n");
-    out.push_str("  for i in \"${!STAGE_IN_FROM[@]}\"; do\n");
-    out.push_str("    local from=${STAGE_IN_FROM[i]}\n");
-    out.push_str("    local to\n");
-    out.push_str("    to=$(scratch_host_path_for \"${STAGE_IN_TO[i]}\")\n");
-    out.push_str("    echo \"Staging in $from -> $to\"\n");
-    out.push_str("    stage_copy_path \"$from\" \"$to\" \"${STAGE_IN_MODES[i]}\"\n");
-    out.push_str("  done\n");
-    out.push_str("}\n\n");
+    render_scratch_host_path_for_function(out);
+    render_stage_copy_path_function(out);
+    render_stage_in_paths_on_current_node_function(out);
     out.push_str("stage_in_paths_on_current_node\n");
     out.push_str("HPC_COMPOSE_STAGE_IN_NODE\n");
     out.push_str("  chmod +x \"$script_path\"\n");
@@ -215,22 +211,7 @@ pub(super) fn render_stage_helpers(out: &mut String, plan: &RuntimePlan) {
     out.push_str("  fi\n");
     out.push_str("}\n\n");
 
-    out.push_str("stage_out_paths_on_current_node() {\n");
-    out.push_str("  local exit_code=${1:-0}\n");
-    out.push_str("  local outcome=success\n");
-    out.push_str("  (( exit_code != 0 )) && outcome=failure\n");
-    out.push_str("  local i\n");
-    out.push_str("  for i in \"${!STAGE_OUT_FROM[@]}\"; do\n");
-    out.push_str("    local when=${STAGE_OUT_WHEN[i]}\n");
-    out.push_str("    if [[ \"$when\" == \"on_success\" && \"$outcome\" != \"success\" ]]; then continue; fi\n");
-    out.push_str("    if [[ \"$when\" == \"on_failure\" && \"$outcome\" != \"failure\" ]]; then continue; fi\n");
-    out.push_str("    local from\n");
-    out.push_str("    from=$(scratch_host_path_for \"${STAGE_OUT_FROM[i]}\")\n");
-    out.push_str("    local to=${STAGE_OUT_TO[i]}\n");
-    out.push_str("    echo \"Staging out $from -> $to\"\n");
-    out.push_str("    stage_copy_path \"$from\" \"$to\" \"${STAGE_OUT_MODES[i]}\"\n");
-    out.push_str("  done\n");
-    out.push_str("}\n\n");
+    render_stage_out_paths_on_current_node_function(out);
 
     out.push_str("write_stage_out_node_script() {\n");
     out.push_str("  local script_path=\"$JOB_TMP/stage-out-node.sh\"\n");
@@ -256,49 +237,9 @@ pub(super) fn render_stage_helpers(out: &mut String, plan: &RuntimePlan) {
         "STAGE_OUT_WHEN={}\n\n",
         bash_array_literal(&stage_out_when)
     ));
-    out.push_str("scratch_host_path_for() {\n");
-    out.push_str("  local path=$1\n");
-    out.push_str("  if [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\" ]]; then\n");
-    out.push_str("    printf '%s' \"$SCRATCH_HOST_PATH\"\n");
-    out.push_str("  elif [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\"/* ]]; then\n");
-    out.push_str(
-        "    printf '%s/%s' \"$SCRATCH_HOST_PATH\" \"${path#\"$SCRATCH_CONTAINER_PATH\"/}\"\n",
-    );
-    out.push_str("  else\n");
-    out.push_str("    printf '%s' \"$path\"\n");
-    out.push_str("  fi\n");
-    out.push_str("}\n\n");
-    out.push_str("stage_copy_path() {\n");
-    out.push_str("  local from=$1\n");
-    out.push_str("  local to=$2\n");
-    out.push_str("  local mode=$3\n");
-    out.push_str("  mkdir -p \"$(dirname \"$to\")\"\n");
-    out.push_str("  if [[ \"$mode\" == \"rsync\" ]]; then\n");
-    out.push_str("    if command -v rsync >/dev/null 2>&1; then\n");
-    out.push_str("      rsync -a \"$from\" \"$to\"\n");
-    out.push_str("    else\n");
-    out.push_str("      cp -R \"$from\" \"$to\"\n");
-    out.push_str("    fi\n");
-    out.push_str("  else\n");
-    out.push_str("    cp -R \"$from\" \"$to\"\n");
-    out.push_str("  fi\n");
-    out.push_str("}\n\n");
-    out.push_str("stage_out_paths_on_current_node() {\n");
-    out.push_str("  local exit_code=${1:-0}\n");
-    out.push_str("  local outcome=success\n");
-    out.push_str("  (( exit_code != 0 )) && outcome=failure\n");
-    out.push_str("  local i\n");
-    out.push_str("  for i in \"${!STAGE_OUT_FROM[@]}\"; do\n");
-    out.push_str("    local when=${STAGE_OUT_WHEN[i]}\n");
-    out.push_str("    if [[ \"$when\" == \"on_success\" && \"$outcome\" != \"success\" ]]; then continue; fi\n");
-    out.push_str("    if [[ \"$when\" == \"on_failure\" && \"$outcome\" != \"failure\" ]]; then continue; fi\n");
-    out.push_str("    local from\n");
-    out.push_str("    from=$(scratch_host_path_for \"${STAGE_OUT_FROM[i]}\")\n");
-    out.push_str("    local to=${STAGE_OUT_TO[i]}\n");
-    out.push_str("    echo \"Staging out $from -> $to\"\n");
-    out.push_str("    stage_copy_path \"$from\" \"$to\" \"${STAGE_OUT_MODES[i]}\"\n");
-    out.push_str("  done\n");
-    out.push_str("}\n\n");
+    render_scratch_host_path_for_function(out);
+    render_stage_copy_path_function(out);
+    render_stage_out_paths_on_current_node_function(out);
     out.push_str("stage_out_paths_on_current_node \"$exit_code\"\n");
     out.push_str("HPC_COMPOSE_STAGE_OUT_NODE\n");
     out.push_str("  chmod +x \"$script_path\"\n");
@@ -380,7 +321,7 @@ pub(super) fn render_hf_stage_in(out: &mut String, plan: &RuntimePlan, huggingfa
 
 /// Single-quotes a value for safe embedding in the rendered shell step.
 fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
+    crate::shell_quote::quote_always_with_backslash_apostrophe(value)
 }
 
 fn stage_mode_label(mode: StageMode) -> &'static str {

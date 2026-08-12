@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::dotenv::parse_dotenv_lines;
+
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
 const SETTINGS_RELATIVE_PATH: &str = ".hpc-compose/settings.toml";
 
@@ -50,6 +52,24 @@ pub enum ValueSource {
     /// A value resolved through the top-level `secrets:` block (file or env).
     /// Always treated as sensitive for redaction regardless of its name.
     Secret,
+}
+
+/// Collects the concrete values of interpolation variables resolved through
+/// [`ValueSource::Secret`] for value-equality redaction.
+#[must_use]
+pub(crate) fn secret_value_set(
+    vars: &BTreeMap<String, String>,
+    sources: &BTreeMap<String, ValueSource>,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (key, source) in sources {
+        if *source == ValueSource::Secret
+            && let Some(value) = vars.get(key)
+        {
+            out.insert(value.clone());
+        }
+    }
+    out
 }
 
 /// A resolved value and where it came from.
@@ -433,10 +453,7 @@ impl ResolvedContext {
     /// a benign-keyed value that equals a declared secret is still hidden.
     #[must_use]
     pub fn secret_values(&self) -> BTreeSet<String> {
-        crate::redaction::secret_value_set(
-            &self.interpolation_vars,
-            &self.interpolation_var_sources,
-        )
+        secret_value_set(&self.interpolation_vars, &self.interpolation_var_sources)
     }
 }
 
@@ -492,15 +509,12 @@ pub fn repo_adjacent_settings_path(start: &Path) -> PathBuf {
 }
 
 /// Detects the nearest git root from `start`, or returns `start`.
+///
+/// This public compatibility wrapper preserves the historical function-item
+/// provenance while delegating the path policy to its crate-private owner.
 #[must_use]
 pub fn repo_root_or_cwd(start: &Path) -> PathBuf {
-    for dir in start.ancestors() {
-        let git = dir.join(".git");
-        if git.exists() {
-            return dir.to_path_buf();
-        }
-    }
-    start.to_path_buf()
+    crate::path_util::repo_root_or_cwd(start)
 }
 
 /// Loads settings if a path exists.
@@ -1176,46 +1190,54 @@ fn resolve_string_path(value: &str, base: &Path) -> PathBuf {
 fn parse_env_file(path: &Path) -> Result<BTreeMap<String, String>> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read env file {}", path.display()))?;
-    let mut vars = BTreeMap::new();
-    for (index, line) in raw.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let stripped = trimmed.strip_prefix("export ").unwrap_or(trimmed);
-        let Some((key, value)) = stripped.split_once('=') else {
-            bail!(
-                "failed to parse {}: line {} must use KEY=VALUE syntax",
-                path.display(),
-                index + 1
-            );
-        };
-        let key = key.trim();
-        if key.is_empty() {
-            bail!(
-                "failed to parse {}: line {} has an empty variable name",
-                path.display(),
-                index + 1
-            );
-        }
-        let value = value.trim();
-        let value = if quoted(value, '"') || quoted(value, '\'') {
-            value[1..value.len() - 1].to_string()
-        } else {
-            value.to_string()
-        };
-        vars.insert(key.to_string(), value);
-    }
-    Ok(vars)
-}
-
-fn quoted(value: &str, quote: char) -> bool {
-    value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote)
+    parse_dotenv_lines(&raw).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to parse {}: line {} {}",
+            path.display(),
+            error.line,
+            error.kind.reason()
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_value_set_projects_exact_secret_values_without_filtering() {
+        let vars = BTreeMap::from([
+            ("empty".to_string(), String::new()),
+            ("short".to_string(), "1".to_string()),
+            ("whitespace".to_string(), "  secret value\t".to_string()),
+            ("unicode".to_string(), "sëcret-🔐".to_string()),
+            ("first_duplicate".to_string(), "shared".to_string()),
+            ("second_duplicate".to_string(), "shared".to_string()),
+            ("process".to_string(), "visible".to_string()),
+            ("unsourced".to_string(), "not-selected".to_string()),
+        ]);
+        let sources = BTreeMap::from([
+            ("empty".to_string(), ValueSource::Secret),
+            ("short".to_string(), ValueSource::Secret),
+            ("whitespace".to_string(), ValueSource::Secret),
+            ("unicode".to_string(), ValueSource::Secret),
+            ("first_duplicate".to_string(), ValueSource::Secret),
+            ("second_duplicate".to_string(), ValueSource::Secret),
+            ("process".to_string(), ValueSource::ProcessEnv),
+            ("missing_value".to_string(), ValueSource::Secret),
+        ]);
+
+        assert_eq!(
+            secret_value_set(&vars, &sources),
+            BTreeSet::from([
+                String::new(),
+                "1".to_string(),
+                "  secret value\t".to_string(),
+                "shared".to_string(),
+                "sëcret-🔐".to_string(),
+            ])
+        );
+    }
 
     fn settings_fixture() -> Settings {
         let mut settings = Settings {
@@ -1578,8 +1600,80 @@ mod tests {
             crate::path_util::absolute_path(Path::new("/tmp/absolute"), tmp.path()),
             PathBuf::from("/tmp/absolute")
         );
-        assert!(quoted("\"value\"", '"'));
-        assert!(!quoted("value", '"'));
+    }
+
+    #[test]
+    fn env_file_parser_preserves_dotenv_edge_grammar() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("vars.env");
+        fs::write(
+            &path,
+            concat!(
+                "  # comment with leading whitespace\n",
+                " export EMPTY =   \n",
+                "DUPLICATE=first\n",
+                " DUPLICATE = second \n",
+                "DOUBLE=\"two words\"\n",
+                "SINGLE='one word'\n",
+                "EMPTY_DOUBLE=\"\"\n",
+                "EMPTY_SINGLE=''\n",
+                "UNMATCHED_SINGLE='left\n",
+                "UNMATCHED_DOUBLE=\"right\n",
+                "MISMATCHED_SINGLE='left\"\n",
+                "MISMATCHED_DOUBLE=\"right'\n",
+            ),
+        )
+        .expect("env file");
+
+        let parsed = parse_env_file(&path).expect("parse env");
+        assert_eq!(parsed.get("EMPTY").map(String::as_str), Some(""));
+        assert_eq!(parsed.get("DUPLICATE").map(String::as_str), Some("second"));
+        assert_eq!(parsed.get("DOUBLE").map(String::as_str), Some("two words"));
+        assert_eq!(parsed.get("SINGLE").map(String::as_str), Some("one word"));
+        assert_eq!(parsed.get("EMPTY_DOUBLE").map(String::as_str), Some(""));
+        assert_eq!(parsed.get("EMPTY_SINGLE").map(String::as_str), Some(""));
+        assert_eq!(
+            parsed.get("UNMATCHED_SINGLE").map(String::as_str),
+            Some("'left")
+        );
+        assert_eq!(
+            parsed.get("UNMATCHED_DOUBLE").map(String::as_str),
+            Some("\"right")
+        );
+        assert_eq!(
+            parsed.get("MISMATCHED_SINGLE").map(String::as_str),
+            Some("'left\"")
+        );
+        assert_eq!(
+            parsed.get("MISMATCHED_DOUBLE").map(String::as_str),
+            Some("\"right'")
+        );
+    }
+
+    #[test]
+    fn env_file_parser_reports_exact_line_and_reason() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("vars.env");
+
+        fs::write(&path, "GOOD=1\n# comment\nBROKEN\n").expect("env file");
+        assert_eq!(
+            parse_env_file(&path)
+                .expect_err("missing equals")
+                .to_string(),
+            format!(
+                "failed to parse {}: line 3 must use KEY=VALUE syntax",
+                path.display()
+            )
+        );
+
+        fs::write(&path, "GOOD=1\n\n = value\n").expect("env file");
+        assert_eq!(
+            parse_env_file(&path).expect_err("empty key").to_string(),
+            format!(
+                "failed to parse {}: line 3 has an empty variable name",
+                path.display()
+            )
+        );
     }
 
     #[test]

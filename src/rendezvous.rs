@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::{RendezvousNameIssue, rendezvous_name_issue};
 use crate::time_util;
 
 const RENDEZVOUS_DIR_NAME: &str = "rendezvous";
@@ -73,34 +74,22 @@ pub fn unix_timestamp_now() -> u64 {
 /// Returns an error when the value is empty or cannot be represented as one
 /// safe path component.
 pub fn validate_name(value: &str) -> Result<()> {
-    if value.trim().is_empty() {
-        bail!("rendezvous name must not be empty");
+    match rendezvous_name_issue(value) {
+        Some(RendezvousNameIssue::Empty) => bail!("rendezvous name must not be empty"),
+        Some(RendezvousNameIssue::ReservedPathComponent) => {
+            bail!("rendezvous name must not be '.' or '..'")
+        }
+        Some(RendezvousNameIssue::UnsupportedCharacter) => {
+            bail!("rendezvous name must contain only ASCII letters, digits, '.', '_', or '-'")
+        }
+        None => Ok(()),
     }
-    if !value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    {
-        bail!("rendezvous name must contain only ASCII letters, digits, '.', '_', or '-'");
-    }
-    Ok(())
 }
 
 /// Converts a rendezvous name into the stable uppercase environment token.
 #[must_use]
 pub fn env_token(name: &str) -> String {
-    let mut token = String::new();
-    for byte in name.bytes() {
-        if byte.is_ascii_alphanumeric() {
-            token.push((byte as char).to_ascii_uppercase());
-        } else {
-            token.push('_');
-        }
-    }
-    if token.is_empty() {
-        "_".to_string()
-    } else {
-        token
-    }
+    crate::domain::rendezvous_env_token(name)
 }
 
 /// Returns `<cache_dir>/rendezvous`.
@@ -520,18 +509,66 @@ mod tests {
         }
     }
 
+    fn expected_record_json(
+        cache_dir: &Path,
+        job_id: &str,
+        host: &str,
+        registered_at: u64,
+    ) -> String {
+        let cache_dir = serde_json::to_string(cache_dir).expect("cache path JSON");
+        format!(
+            r#"{{
+  "schema_version": 1,
+  "name": "model",
+  "job_id": "{job_id}",
+  "service": "server",
+  "host": "{host}",
+  "port": 8000,
+  "protocol": "http",
+  "path": "/v1",
+  "url": "http://{host}:8000/v1",
+  "registered_at": {registered_at},
+  "ttl_seconds": 60,
+  "cache_dir": {cache_dir},
+  "metadata": {{}}
+}}"#
+        )
+    }
+
     #[test]
-    fn name_validation_rejects_path_components() {
+    fn name_validation_preserves_public_messages_and_accepted_components() {
         assert!(validate_name("model-server_1.0").is_ok());
         assert!(validate_name("../bad").is_err());
-        assert!(validate_name("bad/name").is_err());
-        assert!(validate_name("").is_err());
+        for value in [".", ".."] {
+            assert_eq!(
+                validate_name(value)
+                    .expect_err("reserved path component")
+                    .to_string(),
+                "rendezvous name must not be '.' or '..'"
+            );
+            assert!(
+                entry_dir(Path::new("/shared/cache"), value).is_err(),
+                "reserved component {value:?} must not escape the rendezvous root"
+            );
+        }
+        assert_eq!(
+            validate_name(" \t").expect_err("empty name").to_string(),
+            "rendezvous name must not be empty"
+        );
+        assert_eq!(
+            validate_name(" bad/name")
+                .expect_err("unsupported name")
+                .to_string(),
+            "rendezvous name must contain only ASCII letters, digits, '.', '_', or '-'"
+        );
     }
 
     #[test]
     fn env_token_is_stable_and_uppercase() {
         assert_eq!(env_token("model-server.v1"), "MODEL_SERVER_V1");
         assert_eq!(env_token("a b"), "A_B");
+        assert_eq!(env_token("é"), "__");
+        assert_eq!(env_token("🙂"), "____");
     }
 
     #[test]
@@ -549,6 +586,160 @@ mod tests {
         assert!(first_path.exists());
         assert!(second_path.exists());
         assert_eq!(latest.job_id, "102");
+    }
+
+    #[test]
+    fn register_publishes_exact_pretty_json_bytes_without_temp_residue() {
+        let dir = tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("cache");
+        let record = build_record(&cache_dir, request("model", "101", 60), 10).expect("record");
+
+        let historical = register(&cache_dir, &record).expect("register");
+        let latest = latest_path(&cache_dir, "model").expect("latest path");
+        let expected = expected_record_json(&cache_dir, "101", "node-a", 10);
+
+        assert_eq!(
+            fs::read(&historical).expect("historical bytes"),
+            expected.as_bytes()
+        );
+        assert_eq!(
+            fs::read(&latest).expect("latest bytes"),
+            expected.as_bytes()
+        );
+        assert!(
+            !expected.ends_with('\n'),
+            "rendezvous pretty JSON currently has no trailing newline"
+        );
+        let leftovers = fs::read_dir(historical.parent().expect("entry dir"))
+            .expect("read entry dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect::<Vec<_>>();
+        assert!(
+            leftovers.is_empty(),
+            "successful publication left {leftovers:?}"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // OpenOptions without an explicit mode creates both publications
+            // with the process's umask-governed default mode.
+            let historical_mode = fs::metadata(&historical)
+                .expect("historical metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            let latest_mode = fs::metadata(&latest)
+                .expect("latest metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(historical_mode, latest_mode);
+            assert_eq!(historical_mode & 0o600, 0o600);
+            assert_eq!(historical_mode & 0o111, 0);
+        }
+    }
+
+    #[test]
+    fn register_atomically_overwrites_history_and_latest_with_fresh_modes() {
+        let dir = tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("cache");
+        let first = build_record(&cache_dir, request("model", "101", 60), 10).expect("first");
+        let historical = register(&cache_dir, &first).expect("register first");
+        let latest = latest_path(&cache_dir, "model").expect("latest path");
+
+        #[cfg(unix)]
+        let (historical_inode, latest_inode, created_mode) = {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+            let historical_metadata = fs::metadata(&historical).expect("historical metadata");
+            let latest_metadata = fs::metadata(&latest).expect("latest metadata");
+            let created_mode = historical_metadata.permissions().mode() & 0o777;
+            assert_eq!(created_mode, latest_metadata.permissions().mode() & 0o777);
+            let alternate_mode = if created_mode == 0o600 { 0o644 } else { 0o600 };
+            fs::set_permissions(&historical, fs::Permissions::from_mode(alternate_mode))
+                .expect("set historical mode");
+            fs::set_permissions(&latest, fs::Permissions::from_mode(alternate_mode))
+                .expect("set latest mode");
+            (
+                historical_metadata.ino(),
+                latest_metadata.ino(),
+                created_mode,
+            )
+        };
+
+        let mut second_request = request("model", "101", 60);
+        second_request.host = "node-b".to_string();
+        let second = build_record(&cache_dir, second_request, 11).expect("second");
+        let rewritten_historical = register(&cache_dir, &second).expect("register second");
+        assert_eq!(rewritten_historical, historical);
+
+        let expected = expected_record_json(&cache_dir, "101", "node-b", 11);
+        assert_eq!(
+            fs::read(&historical).expect("historical bytes"),
+            expected.as_bytes()
+        );
+        assert_eq!(
+            fs::read(&latest).expect("latest bytes"),
+            expected.as_bytes()
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+            let rewritten_historical =
+                fs::metadata(&historical).expect("rewritten historical metadata");
+            let rewritten_latest = fs::metadata(&latest).expect("rewritten latest metadata");
+            assert_ne!(rewritten_historical.ino(), historical_inode);
+            assert_ne!(rewritten_latest.ino(), latest_inode);
+            assert_eq!(
+                rewritten_historical.permissions().mode() & 0o777,
+                created_mode
+            );
+            assert_eq!(rewritten_latest.permissions().mode() & 0o777, created_mode);
+        }
+    }
+
+    #[test]
+    fn failed_latest_publication_currently_leaves_history_and_temp_file() {
+        let dir = tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("cache");
+        let record = build_record(&cache_dir, request("model", "101", 60), 10).expect("record");
+        let entry = entry_dir(&cache_dir, "model").expect("entry dir");
+        fs::create_dir_all(entry.join(LATEST_FILE_NAME)).expect("blocking latest directory");
+
+        let err = register(&cache_dir, &record).expect_err("latest rename must fail");
+        assert!(
+            err.to_string().contains("failed to rename"),
+            "unexpected publication error: {err:#}"
+        );
+
+        let historical = entry.join("101-server.json");
+        let expected = expected_record_json(&cache_dir, "101", "node-a", 10);
+        assert_eq!(
+            fs::read(&historical).expect("published history"),
+            expected.as_bytes(),
+            "history is published before the latest pointer is attempted"
+        );
+        let leaked = fs::read_dir(&entry)
+            .expect("read entry dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(".latest.json.") && name.ends_with(".tmp")
+            })
+            .collect::<Vec<_>>();
+        // Characterization of the existing failure path: rename errors do not
+        // clean up the completed temporary file.
+        assert_eq!(leaked.len(), 1, "unexpected temp files: {leaked:?}");
+        assert_eq!(
+            fs::read(leaked[0].path()).expect("leaked temp bytes"),
+            expected.as_bytes()
+        );
     }
 
     #[test]

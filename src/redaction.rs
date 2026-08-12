@@ -35,6 +35,10 @@ const SENSITIVE_NAME_NEEDLES: &[&str] = &[
 /// drift from the substitution itself.
 pub const REDACTED_PLACEHOLDER: &str = "<redacted>";
 
+// Transitional crate-internal compatibility for the command-layer commit.
+// Secret-source projection is owned by `crate::context`.
+pub(crate) use crate::context::secret_value_set;
+
 /// Returns `true` when *name* matches the sensitive-name heuristic.
 #[must_use]
 pub fn is_sensitive_name(name: &str) -> bool {
@@ -234,25 +238,6 @@ pub fn redact_yaml_value(
         return;
     }
     redact_yaml_value_inner(value, secret_values, None);
-}
-
-/// Collects the concrete values of interpolation variables whose source is
-/// [`ValueSource::Secret`]. Used for value-equality redaction of service env
-/// entries that reference a secret under a benign key.
-#[must_use]
-pub fn secret_value_set(
-    vars: &BTreeMap<String, String>,
-    sources: &BTreeMap<String, ValueSource>,
-) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for (key, source) in sources {
-        if *source == ValueSource::Secret
-            && let Some(value) = vars.get(key)
-        {
-            out.insert(value.clone());
-        }
-    }
-    out
 }
 
 fn redact_json_value_inner(
@@ -491,19 +476,6 @@ mod tests {
         map.insert("API_KEY".to_string(), "hunter2".to_string());
         let redacted = redact_env_map(&map, &BTreeSet::new(), true);
         assert_eq!(redacted["API_KEY"], "hunter2");
-    }
-
-    #[test]
-    fn secret_value_set_collects_only_secret_sourced_values() {
-        let mut vars = BTreeMap::new();
-        vars.insert("hf_token".to_string(), "abc".to_string());
-        vars.insert("PATH".to_string(), "/bin".to_string());
-        let mut sources = BTreeMap::new();
-        sources.insert("hf_token".to_string(), ValueSource::Secret);
-        sources.insert("PATH".to_string(), ValueSource::ProcessEnv);
-        let set = secret_value_set(&vars, &sources);
-        assert!(set.contains("abc"));
-        assert!(!set.contains("/bin"));
     }
 
     #[test]

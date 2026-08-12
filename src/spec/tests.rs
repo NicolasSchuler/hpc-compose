@@ -2125,6 +2125,32 @@ services:
             "x-slurm.rendezvous.discover[0] must contain only ASCII letters",
         ),
         (
+            "reserved discovery name",
+            r#"
+x-slurm:
+  rendezvous:
+    discover: ".."
+services:
+  app:
+    image: redis:7
+"#,
+            "x-slurm.rendezvous.discover[0] must not be '.' or '..'",
+        ),
+        (
+            "colliding discovery environment tokens",
+            r#"
+x-slurm:
+  rendezvous:
+    discover:
+      - model.server-v1
+      - model_server_v1
+services:
+  app:
+    image: redis:7
+"#,
+            "x-slurm.rendezvous.discover names 'model.server-v1' and 'model_server_v1' both map to environment token 'MODEL_SERVER_V1'",
+        ),
+        (
             "invalid provider name",
             r#"
 services:
@@ -2261,6 +2287,49 @@ services:
         };
         let text = format!("{err:#}");
         assert!(text.contains(expected), "{label}: {text}");
+    }
+}
+
+#[test]
+fn rendezvous_name_validation_preserves_exact_field_framing() {
+    validate_rendezvous_name("model-server_1.0", "field").expect("accepted rendezvous name");
+
+    for (value, field, expected) in [
+        (
+            "..",
+            "x-slurm.rendezvous.discover[2]",
+            "x-slurm.rendezvous.discover[2] must not be '.' or '..'",
+        ),
+        (
+            " \t",
+            "x-slurm.rendezvous.discover[2]",
+            "x-slurm.rendezvous.discover[2] must not be empty",
+        ),
+        (
+            "bad/name",
+            "service 'api' x-slurm.rendezvous.register.name",
+            "service 'api' x-slurm.rendezvous.register.name must contain only ASCII letters, digits, '.', '_', or '-'",
+        ),
+        (
+            "é",
+            "service 'api' x-slurm.rendezvous.register.metadata key",
+            "service 'api' x-slurm.rendezvous.register.metadata key must contain only ASCII letters, digits, '.', '_', or '-'",
+        ),
+    ] {
+        assert_eq!(
+            validate_rendezvous_name(value, field)
+                .expect_err("invalid rendezvous name")
+                .to_string(),
+            expected
+        );
+    }
+
+    for value in [".", ".."] {
+        validate_rendezvous_metadata_key(
+            value,
+            "service 'api' x-slurm.rendezvous.register.metadata key",
+        )
+        .expect("metadata keys are not filesystem path components");
     }
 }
 
@@ -5027,40 +5096,8 @@ fn slurm_time_limit_rejects_out_of_range_components() {
     assert!(parse_slurm_time_limit("1-24").is_err());
 }
 
-#[test]
-fn memory_bytes_parser_handles_units_decimals_and_sentinels() {
-    assert_eq!(parse_memory_bytes("1048576"), Some(1_048_576));
-    assert_eq!(parse_memory_bytes("512M"), Some(512 * 1_024 * 1_024));
-    assert_eq!(parse_memory_bytes("2GiB"), Some(2 * GIB));
-    assert_eq!(parse_memory_bytes("1.5G"), Some(1_610_612_736));
-    // sacct sentinels and empty values map to None.
-    assert_eq!(parse_memory_bytes("unknown"), None);
-    assert_eq!(parse_memory_bytes("UNKNOWN"), None);
-    assert_eq!(parse_memory_bytes("   "), None);
-    // Unsupported units and missing magnitudes are rejected.
-    assert_eq!(parse_memory_bytes("4Gc"), None);
-    assert_eq!(parse_memory_bytes("G"), None);
-    // Integer and decimal forms of the same size round-trip to the same bytes.
-    assert_eq!(parse_memory_bytes("2G"), parse_memory_bytes("2.0G"));
-    // Saturates instead of overflowing.
-    assert_eq!(parse_memory_bytes("99999999999P"), Some(u64::MAX));
-}
-
 proptest! {
     #![proptest_config(prop_config())]
-
-    #[test]
-    fn property_memory_bytes_parser_is_total(
-        value in string_regex("[0-9]{0,6}(\\.[0-9]{0,3})?\\s*[KMGTPkmgtpiIbB]{0,3}")
-            .expect("memory regex")
-    ) {
-        // The parser must be total: never panic, regardless of the input shape.
-        let parsed = parse_memory_bytes(&value);
-        // Re-parsing a successfully parsed integer byte count is idempotent.
-        if let Some(bytes) = parsed {
-            prop_assert_eq!(parse_memory_bytes(&bytes.to_string()), Some(bytes));
-        }
-    }
 
     #[test]
     fn property_rejects_unsupported_root_keys(
@@ -6037,6 +6074,83 @@ services:
     }
 }
 
+#[test]
+fn service_mount_validation_accepts_edge_whitespace_but_rejects_nul() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let whitespace = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: redis:7
+    volumes:
+      - " ./data : /workspace/data "
+"#,
+    );
+    let spec = ComposeSpec::load(&whitespace).expect("whitespace mount validates");
+    assert_eq!(
+        spec.services.get("app").expect("app").volumes,
+        vec![" ./data : /workspace/data "]
+    );
+
+    let nul = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: redis:7
+    volumes:
+      - "./data:/workspace/data\0"
+"#,
+    );
+    let err = ComposeSpec::load(&nul).expect_err("nul mount rejected");
+    let spec_error = err
+        .downcast_ref::<SpecError>()
+        .expect("mount rejection should be a SpecError");
+    match spec_error {
+        SpecError::InvalidMountSyntax {
+            field,
+            value,
+            problem,
+        } => {
+            assert_eq!(field, "service 'app' volumes[0]");
+            assert_eq!(value, "./data:/workspace/data\0");
+            assert_eq!(problem, "must not contain null bytes");
+            assert_eq!(
+                spec_error.to_string(),
+                "service 'app' volumes[0] has an invalid mount './data:/workspace/data\0': must not contain null bytes"
+            );
+        }
+        other => panic!("expected invalid mount syntax, got {other:?}"),
+    }
+}
+
+#[test]
+fn prepare_mount_validation_reuses_the_service_mount_contract() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let path = write_spec(
+        tmpdir.path(),
+        "services:\n  app:\n    image: redis:7\n    x-runtime:\n      prepare:\n        commands: [echo prepare]\n        mounts:\n          - \"./data:/workspace/data\\0\"\n",
+    );
+
+    let err = ComposeSpec::load(&path).expect_err("prepare mount NUL rejected");
+    let spec_error = err
+        .downcast_ref::<SpecError>()
+        .expect("prepare mount rejection should be a SpecError");
+    match spec_error {
+        SpecError::InvalidMountSyntax {
+            field,
+            value,
+            problem,
+        } => {
+            assert_eq!(field, "service 'app' x-runtime.prepare.mounts[0]");
+            assert_eq!(value, "./data:/workspace/data\0");
+            assert_eq!(problem, "must not contain null bytes");
+        }
+        other => panic!("expected invalid prepare mount syntax, got {other:?}"),
+    }
+}
+
 // --- F3: contradictory gpus + gres guard ---
 
 #[test]
@@ -6413,6 +6527,57 @@ services:
         .map(|h| h.to_string())
         .unwrap_or_default();
     assert!(help.contains("KEY=VALUE"), "help was: {help}");
+}
+
+#[test]
+fn env_file_malformed_line_preserves_exact_reason_framing() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let env_path = tmpdir.path().join("service.env");
+    let spec_path = write_spec(
+        tmpdir.path(),
+        r#"
+services:
+  app:
+    image: alpine:latest
+    env_file: service.env
+"#,
+    );
+
+    for (contents, line, reason) in [
+        (
+            "GOOD=1\n# comment\nBROKEN\n",
+            3,
+            "must use KEY=VALUE syntax",
+        ),
+        ("GOOD=1\n\n = value\n", 3, "has an empty variable name"),
+    ] {
+        fs::write(&env_path, contents).expect("env file");
+        let err = ComposeSpec::load(&spec_path).expect_err("malformed env_file");
+        let spec_error = err
+            .downcast_ref::<SpecError>()
+            .expect("env_file rejection should be a SpecError");
+        match spec_error {
+            SpecError::EnvFileMalformedLine {
+                service,
+                path,
+                line: actual_line,
+                reason: actual_reason,
+            } => {
+                assert_eq!(service, "app");
+                assert_eq!(path, &env_path);
+                assert_eq!(*actual_line, line);
+                assert_eq!(actual_reason, reason);
+                assert_eq!(
+                    spec_error.to_string(),
+                    format!(
+                        "service 'app' env_file '{}' line {line}: {reason}",
+                        env_path.display()
+                    )
+                );
+            }
+            other => panic!("expected malformed env_file, got {other:?}"),
+        }
+    }
 }
 
 #[test]

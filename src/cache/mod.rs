@@ -1,6 +1,8 @@
 //! Cache manifest management for imported and prepared image artifacts.
 
 pub mod dataset;
+#[allow(dead_code)]
+pub(crate) mod observation;
 pub mod source;
 
 use std::collections::HashSet;
@@ -11,7 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::planner::{ImageSource, PreparedImageSpec, registry_host_for_remote};
+use crate::planner::{ImageSource, PreparedImageSpec};
 use crate::runtime_plan::{RuntimePlan, RuntimeService, base_image_path_for_backend};
 use crate::time_util::{SECONDS_PER_DAY, unix_timestamp_now};
 
@@ -396,14 +398,12 @@ fn staged_kind_suffix(kind: &CacheEntryKind) -> &'static str {
 
 /// Test-only: read a staged-input sidecar manifest at an explicit path.
 #[cfg(test)]
-pub(crate) fn read_staged_manifest_for_test(manifest_path: &Path) -> CacheEntryManifest {
+fn read_staged_manifest_for_test(manifest_path: &Path) -> CacheEntryManifest {
     let raw = fs::read_to_string(manifest_path).expect("read staged manifest");
     serde_json::from_str(&raw).expect("parse staged manifest")
 }
 
-pub(crate) fn read_staged_manifest_if_exists(
-    manifest_path: &Path,
-) -> Result<Option<CacheEntryManifest>> {
+fn read_staged_manifest_if_exists(manifest_path: &Path) -> Result<Option<CacheEntryManifest>> {
     if !manifest_path.exists() {
         return Ok(None);
     }
@@ -632,7 +632,13 @@ pub fn referenced_artifacts(plan: &RuntimePlan) -> HashSet<PathBuf> {
     referenced
 }
 
-/// Computes the cache key used for one service artifact kind.
+/// Returns the legacy descriptive cache-key representation for one service.
+///
+/// This compatibility helper does not return the hashed keys used by current
+/// runtime-plan paths or cache manifests. Those keys are derived by the
+/// runtime-plan and prepare pipelines from their complete backend-specific
+/// inputs. Unsupported entry kinds, and prepared services without a prepare
+/// specification, retain the historical empty-string result.
 #[must_use]
 pub fn cache_key_for_service(service: &RuntimeService, kind: CacheEntryKind) -> String {
     match kind {
@@ -670,7 +676,7 @@ pub fn parse_remote_registry(source: &ImageSource) -> Option<String> {
     let ImageSource::Remote(remote) = source else {
         return None;
     };
-    Some(registry_host_for_remote(remote))
+    Some(crate::domain::registry_host_for_remote(remote))
 }
 
 fn remove_manifest_and_artifact_if(

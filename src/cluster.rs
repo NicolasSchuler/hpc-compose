@@ -545,7 +545,7 @@ pub fn generate_cluster_profile(binaries: &ResolvedBinaries) -> ClusterReportGen
 /// Resolves the default profile path relative to the current repository or cwd.
 #[must_use]
 pub fn default_cluster_profile_path(start: &Path) -> PathBuf {
-    crate::context::repo_root_or_cwd(start).join(CLUSTER_PROFILE_RELATIVE_PATH)
+    crate::path_util::repo_root_or_cwd(start).join(CLUSTER_PROFILE_RELATIVE_PATH)
 }
 
 /// Discovers `.hpc-compose/cluster.toml` by searching upward from `start`.
@@ -558,6 +558,14 @@ pub fn discover_cluster_profile_path(start: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Discovers and loads the nearest cluster profile, if one exists.
+pub(crate) fn load_discovered_cluster_profile(start: &Path) -> Result<Option<ClusterProfile>> {
+    let Some(path) = discover_cluster_profile_path(start) else {
+        return Ok(None);
+    };
+    Ok(Some(load_cluster_profile(&path)?))
 }
 
 /// Loads a cluster profile from disk.
@@ -1435,6 +1443,17 @@ mod tests {
         }
     }
 
+    fn write_test_cluster_profile(root: &Path, name: &str) -> PathBuf {
+        let path = root.join(CLUSTER_PROFILE_RELATIVE_PATH);
+        fs::create_dir_all(path.parent().expect("profile parent")).expect("create profile parent");
+        fs::write(
+            &path,
+            format!("schema_version = 1\n[site]\nname = \"{name}\"\n"),
+        )
+        .expect("write cluster profile");
+        path
+    }
+
     fn write_executable(path: &Path, body: &str) {
         fs::write(path, body).expect("write executable");
         let mut perms = fs::metadata(path).expect("metadata").permissions();
@@ -1514,6 +1533,41 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("refusing to write cluster profile")
+        );
+    }
+
+    #[test]
+    fn discovered_cluster_profile_preserves_missing_nearest_and_error_precedence() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let repo = tmpdir.path().join("repo");
+        let nearer_root = repo.join("work");
+        let nested = nearer_root.join("nested");
+        fs::create_dir_all(&nested).expect("create nested start");
+
+        assert!(
+            load_discovered_cluster_profile(&nested)
+                .expect("missing profile is optional")
+                .is_none()
+        );
+
+        write_test_cluster_profile(&repo, "ancestor");
+        let ancestor = load_discovered_cluster_profile(&nested)
+            .expect("load ancestor profile")
+            .expect("ancestor profile");
+        assert_eq!(ancestor.site.name.as_deref(), Some("ancestor"));
+
+        let nearest_path = write_test_cluster_profile(&nearer_root, "nearest");
+        let nearest = load_discovered_cluster_profile(&nested)
+            .expect("load nearest profile")
+            .expect("nearest profile");
+        assert_eq!(nearest.site.name.as_deref(), Some("nearest"));
+
+        fs::write(&nearest_path, "schema_version = [\n").expect("corrupt nearest profile");
+        let error = load_discovered_cluster_profile(&nested)
+            .expect_err("invalid nearest profile must block the valid ancestor");
+        assert_eq!(
+            error.to_string(),
+            format!("failed to parse cluster profile {}", nearest_path.display())
         );
     }
 

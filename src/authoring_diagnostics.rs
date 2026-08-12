@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Error, Result};
 use miette::Diagnostic as _;
 
-use crate::cluster::{discover_cluster_profile_path, load_cluster_profile};
+use crate::cluster::load_discovered_cluster_profile;
 use crate::context::{ResolveRequest, resolve_with_compose_text};
 use crate::lint::{LintLevel, lint_plan};
 use crate::planner::{PlanOptions, build_plan_with_options};
@@ -342,13 +342,6 @@ fn diagnose_document_inner(
             }
         })
         .collect())
-}
-
-fn load_discovered_cluster_profile(start: &Path) -> Result<Option<crate::cluster::ClusterProfile>> {
-    let Some(path) = discover_cluster_profile_path(start) else {
-        return Ok(None);
-    };
-    Ok(Some(load_cluster_profile(&path)?))
 }
 
 fn blocking_error(error: Error, index: &YamlPathIndex) -> AuthoringDiagnostic {

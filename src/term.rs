@@ -35,6 +35,22 @@ fn current_color_policy() -> ColorPolicy {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn with_test_color_policy<T>(policy: ColorPolicy, action: impl FnOnce() -> T) -> T {
+    use std::sync::{Mutex, OnceLock};
+
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("color test lock");
+    let previous = current_color_policy();
+    init_color(policy);
+    let result = action();
+    init_color(previous);
+    result
+}
+
 fn colors_enabled() -> bool {
     colors_enabled_for(OutputStream::Stdout)
 }
@@ -241,33 +257,6 @@ pub(crate) fn symbol_ok() -> &'static str {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn symbol_fail() -> &'static str {
-    if unicode_allowed() {
-        "\u{2717} FAIL"
-    } else {
-        "FAIL"
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn symbol_run() -> &'static str {
-    if unicode_allowed() {
-        "\u{25cf} RUN"
-    } else {
-        "RUN"
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn symbol_pending() -> &'static str {
-    if unicode_allowed() {
-        "\u{25d0} PEND"
-    } else {
-        "PEND"
-    }
-}
-
 fn symbol_build() -> &'static str {
     if unicode_allowed() {
         "\u{25cf} BUILD"
@@ -374,24 +363,10 @@ fn simple_hash(s: &str) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
-
     use super::*;
 
-    fn color_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("color test lock")
-    }
-
     fn with_color_policy<T>(policy: ColorPolicy, action: impl FnOnce() -> T) -> T {
-        let _guard = color_test_lock();
-        let previous = current_color_policy();
-        init_color(policy);
-        let result = action();
-        init_color(previous);
-        result
+        with_test_color_policy(policy, action)
     }
 
     /// Convenience wrapper for the common case in these tests: no `NO_COLOR`,

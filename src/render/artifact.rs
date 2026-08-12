@@ -1,3 +1,5 @@
+use crate::tracked_paths;
+
 pub(super) fn render_artifact_helpers(out: &mut String) {
     out.push_str("artifact_timestamp() {\n");
     out.push_str("  date -u +%Y-%m-%dT%H:%M:%SZ\n");
@@ -202,7 +204,10 @@ pub(super) fn render_artifact_helpers(out: &mut String) {
     out.push_str("    declared_pattern=\"${ARTIFACT_SOURCE_PATTERNS[i]}\"\n");
     out.push_str("    bundle_name=\"${ARTIFACT_PATTERN_BUNDLES[i]}\"\n");
     out.push_str("    pattern_matched=0\n");
-    out.push_str("    host_pattern=\"$JOB_TMP${declared_pattern#/hpc-compose/job}\"\n");
+    out.push_str(&format!(
+        "    host_pattern=\"$JOB_TMP${{declared_pattern#{}}}\"\n",
+        tracked_paths::JOB_CONTAINER_DIR
+    ));
     out.push_str("    while IFS= read -r matched; do\n");
     out.push_str("      [[ -n \"$matched\" ]] || continue\n");
     out.push_str("      pattern_matched=1\n");
@@ -210,7 +215,10 @@ pub(super) fn render_artifact_helpers(out: &mut String) {
     out.push_str("        continue\n");
     out.push_str("      fi\n");
     out.push_str("      seen_matches[\"$matched\"]=1\n");
-    out.push_str("      container_match=\"/hpc-compose/job${matched#\"$JOB_TMP\"}\"\n");
+    out.push_str(&format!(
+        "      container_match=\"{}${{matched#\"$JOB_TMP\"}}\"\n",
+        tracked_paths::JOB_CONTAINER_DIR
+    ));
     out.push_str("      matched_source_paths+=(\"$container_match\")\n");
     out.push_str("      bundle_match_key=\"$bundle_name\"$'\\t'\"$container_match\"\n");
     out.push_str("      if [[ -z \"${seen_bundle_matches[\"$bundle_match_key\"]+x}\" ]]; then\n");
@@ -218,8 +226,14 @@ pub(super) fn render_artifact_helpers(out: &mut String) {
     out.push_str("        ARTIFACT_BUNDLE_MATCH_RECORDS+=(\"$bundle_match_key\")\n");
     out.push_str("      fi\n");
     out.push_str("      if [[ \"$matched\" == \"$JOB_TMP\" ]]; then\n");
-    out.push_str("        ARTIFACT_WARNINGS+=(\"skipped reserved root path '/hpc-compose/job'; collect a child path instead\")\n");
-    out.push_str("        bundle_warning_key=\"$bundle_name\"$'\\t'\"skipped reserved root path '/hpc-compose/job'; collect a child path instead\"\n");
+    out.push_str(&format!(
+        "        ARTIFACT_WARNINGS+=(\"skipped reserved root path '{}'; collect a child path instead\")\n",
+        tracked_paths::JOB_CONTAINER_DIR
+    ));
+    out.push_str(&format!(
+        "        bundle_warning_key=\"$bundle_name\"$'\\t'\"skipped reserved root path '{}'; collect a child path instead\"\n",
+        tracked_paths::JOB_CONTAINER_DIR
+    ));
     out.push_str(
         "        if [[ -z \"${seen_bundle_warnings[\"$bundle_warning_key\"]+x}\" ]]; then\n",
     );

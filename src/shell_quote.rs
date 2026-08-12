@@ -1,14 +1,17 @@
-//! The single canonical POSIX shell single-quoting routine.
+//! POSIX shell single-quoting policies with byte-stable output.
 //!
-//! Every user-controlled value emitted into the generated bash sbatch script —
-//! and any command string later handed to a shell — must pass through
-//! [`quote`]. Historically several near-identical copies existed across the
-//! render, output, and runtime modules; consolidating here gives one tested,
-//! audited implementation guarding the injection surface.
+//! [`quote`] is the canonical general-purpose policy and represents embedded
+//! apostrophes with a double-quoted segment between single-quoted runs. Some
+//! established staging, runtime, and presentation paths instead use a
+//! backslash-escaped apostrophe between single-quoted runs;
+//! [`quote_always_with_backslash_apostrophe`] preserves those exact bytes.
+//! Callers that quote conditionally retain their existing allowlists and
+//! delegate only the always-quoted branch.
 
-/// Wraps `value` in single quotes, escaping embedded single quotes via the
-/// canonical `'\''` sequence, so the result is a single shell word that
-/// expands to exactly `value` with no further interpretation.
+/// Wraps `value` in single quotes, escaping embedded apostrophes with a
+/// double-quoted apostrophe segment between single-quoted runs, so the result
+/// is one shell word that expands to exactly `value` with no further
+/// interpretation.
 #[must_use]
 pub fn quote(value: &str) -> String {
     if value.is_empty() {
@@ -18,9 +21,40 @@ pub fn quote(value: &str) -> String {
     format!("'{escaped}'")
 }
 
+/// Always wraps `value` in single quotes, escaping embedded apostrophes with
+/// a backslash-escaped apostrophe between single-quoted runs.
+///
+/// This preserves exact output bytes for paths that historically used that
+/// representation. New executable render paths should continue using
+/// [`quote`] unless their output contract requires these bytes.
+#[must_use]
+pub(crate) fn quote_always_with_backslash_apostrophe(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Quotes a token only when needed for display in a suggested shell command.
+///
+/// This deliberately preserves an empty string as empty for existing hint
+/// rendering, so it must not be used to construct commands that will actually
+/// be executed. Tokens containing only ASCII alphanumerics or `/._-:` remain
+/// unquoted; every other token is single-quoted with embedded apostrophes
+/// escaped using the existing backslash-apostrophe display sequence.
+#[must_use]
+#[allow(dead_code)]
+pub(crate) fn quote_if_needed_for_display(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
+    {
+        value.to_string()
+    } else {
+        quote_always_with_backslash_apostrophe(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::quote;
+    use super::{quote, quote_always_with_backslash_apostrophe, quote_if_needed_for_display};
     use proptest::prelude::*;
 
     /// Interprets the POSIX quoting that [`quote`] produces, concatenating the
@@ -64,6 +98,43 @@ mod tests {
     fn escapes_embedded_single_quote() {
         assert_eq!(quote("a'b"), "'a'\"'\"'b'");
         assert_eq!(unquote(&quote("a'b")), "a'b");
+    }
+
+    #[test]
+    fn backslash_apostrophe_quoting_preserves_exact_always_quoted_bytes() {
+        let cases = [
+            ("", "''"),
+            ("safe-token", "'safe-token'"),
+            ("two words", "'two words'"),
+            ("demo'spec", "'demo'\\''spec'"),
+        ];
+
+        for (value, expected) in cases {
+            assert_eq!(
+                quote_always_with_backslash_apostrophe(value),
+                expected,
+                "value {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn display_quoting_preserves_the_existing_conditional_matrix() {
+        let cases = [
+            ("safe-token_1/path.yaml", "safe-token_1/path.yaml"),
+            ("job:17", "job:17"),
+            ("two words", "'two words'"),
+            ("demo'spec", "'demo'\\''spec'"),
+            ("", ""),
+        ];
+
+        for (value, expected) in cases {
+            assert_eq!(
+                quote_if_needed_for_display(value),
+                expected,
+                "value {value:?}"
+            );
+        }
     }
 
     proptest! {

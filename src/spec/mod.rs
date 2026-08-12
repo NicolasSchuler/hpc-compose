@@ -6,9 +6,16 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, de};
 
-use crate::domain::{MountParts, parse_node_index_ranges, split_mount_parts};
+use crate::domain::{
+    MountParts, RendezvousNameIssue, parse_node_index_ranges, rendezvous_env_token_collision,
+    rendezvous_name_issue, split_mount_parts,
+};
 use crate::spec_error::SpecError;
 use crate::suggest;
+
+// Transitional crate-internal compatibility for callers moved in the
+// subsequent job-layer commit. Memory parsing is owned by `crate::memory`.
+pub(crate) use crate::memory::{GIB, parse_memory_bytes};
 
 mod healthcheck;
 mod interpolate;
@@ -21,7 +28,6 @@ pub(crate) use interpolate::missing_defaulted_variables_from_str_at_path;
 pub use interpolate::{
     missing_defaulted_variables, missing_defaulted_variables_from_str, referenced_variables,
 };
-pub(crate) use load::mark_spec_validation_error;
 pub use sweep::{
     ObjectiveDirection, SweepConfig, SweepMatrix, SweepObjective, SweepParameterValue,
 };
@@ -3682,16 +3688,26 @@ fn validate_service_script(value: &str, field: &str) -> Result<()> {
 }
 
 fn validate_rendezvous_name(value: &str, field: &str) -> Result<()> {
-    if value.trim().is_empty() {
-        bail!("{field} must not be empty");
+    match rendezvous_name_issue(value) {
+        Some(RendezvousNameIssue::Empty) => bail!("{field} must not be empty"),
+        Some(RendezvousNameIssue::ReservedPathComponent) => {
+            bail!("{field} must not be '.' or '..'")
+        }
+        Some(RendezvousNameIssue::UnsupportedCharacter) => {
+            bail!("{field} must contain only ASCII letters, digits, '.', '_', or '-'")
+        }
+        None => Ok(()),
     }
-    if !value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    {
-        bail!("{field} must contain only ASCII letters, digits, '.', '_', or '-'");
+}
+
+fn validate_rendezvous_metadata_key(value: &str, field: &str) -> Result<()> {
+    match rendezvous_name_issue(value) {
+        Some(RendezvousNameIssue::Empty) => bail!("{field} must not be empty"),
+        Some(RendezvousNameIssue::UnsupportedCharacter) => {
+            bail!("{field} must contain only ASCII letters, digits, '.', '_', or '-'")
+        }
+        Some(RendezvousNameIssue::ReservedPathComponent) | None => Ok(()),
     }
-    Ok(())
 }
 
 fn validate_rendezvous_protocol(value: Option<&str>, field: &str) -> Result<()> {
@@ -3730,6 +3746,16 @@ impl RendezvousClientConfig {
         }
         for (index, name) in self.discover.iter().enumerate() {
             validate_rendezvous_name(name, &format!("x-slurm.rendezvous.discover[{index}]"))?;
+        }
+        if let Some(collision) =
+            rendezvous_env_token_collision(self.discover.iter().map(String::as_str))
+        {
+            bail!(
+                "x-slurm.rendezvous.discover names '{}' and '{}' both map to environment token '{}'; choose names that map to distinct environment tokens",
+                collision.first_name,
+                collision.second_name,
+                collision.token
+            );
         }
         if matches!(self.timeout_seconds, Some(0)) {
             bail!("x-slurm.rendezvous.timeout_seconds must be at least 1");
@@ -3781,7 +3807,7 @@ impl RendezvousRegisterConfig {
             );
         }
         for (key, value) in &self.metadata {
-            validate_rendezvous_name(
+            validate_rendezvous_metadata_key(
                 key,
                 &format!("service '{service_name}' x-slurm.rendezvous.register.metadata key"),
             )?;
@@ -4245,6 +4271,9 @@ impl ServiceRuntimeConfig {
 
 impl PrepareSpec {
     fn validate(&self, field: &str) -> Result<()> {
+        for (index, mount) in self.mounts.iter().enumerate() {
+            validate_mount_syntax(mount, &format!("{field}.mounts[{index}]"))?;
+        }
         self.env.validate_names(&format!("{field}.env"))
     }
 
@@ -4263,54 +4292,6 @@ impl PrepareSpec {
 /// Returns an error when the input is empty or uses an unsupported unit.
 pub fn parse_short_duration(raw: &str) -> Result<u64> {
     validation::parse_duration_seconds(raw)
-}
-
-/// One gibibyte in bytes, shared by every memory-size parser and formatter.
-pub(crate) const GIB: u64 = 1_024 * 1_024 * 1_024;
-
-/// Parses a memory-size string (`512M`, `1.5G`, `2GiB`, `1048576`, …) into a
-/// byte count.
-///
-/// This is the single shared implementation used by the linter and the
-/// `job` accounting/rightsize/scoring code so they all agree on units and edge
-/// cases. It accepts an optional decimal magnitude, the `B`/`K`/`M`/`G`/`T`/`P`
-/// suffixes (with `B`/`iB` variants), and a bare byte count. The Slurm `sacct`
-/// literal `unknown` (any case) and the empty string map to `None`. All
-/// arithmetic saturates, so the function is total and never panics or overflows.
-#[must_use]
-pub(crate) fn parse_memory_bytes(value: &str) -> Option<u64> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unknown") {
-        return None;
-    }
-    let number_end = trimmed
-        .char_indices()
-        .find_map(|(index, ch)| (!ch.is_ascii_digit() && ch != '.').then_some(index))
-        .unwrap_or(trimmed.len());
-    let number = &trimmed[..number_end];
-    if number.is_empty() {
-        return None;
-    }
-    let magnitude = number.parse::<f64>().ok()?;
-    if !magnitude.is_finite() || magnitude < 0.0 {
-        return None;
-    }
-    let multiplier = match trimmed[number_end..].trim().to_ascii_uppercase().as_str() {
-        "" | "B" => 1_u64,
-        "K" | "KB" | "KIB" => 1_024,
-        "M" | "MB" | "MIB" => 1_024_u64.pow(2),
-        "G" | "GB" | "GIB" => GIB,
-        "T" | "TB" | "TIB" => 1_024_u64.pow(4),
-        "P" | "PB" | "PIB" => 1_024_u64.pow(5),
-        _ => return None,
-    };
-    // Multiply in f64 to honor decimals, then clamp into u64 saturatingly.
-    let bytes = magnitude * multiplier as f64;
-    if bytes >= u64::MAX as f64 {
-        Some(u64::MAX)
-    } else {
-        Some(bytes as u64)
-    }
 }
 
 /// Parses a Slurm-style walltime string into seconds.

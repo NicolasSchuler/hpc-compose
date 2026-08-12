@@ -1,53 +1,36 @@
 //! Login-node environment checks run before submission.
 
-use std::collections::BTreeSet;
+mod shared_fs_probe;
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use serde::Serialize;
 
 use crate::cluster::{ClusterProfile, MpiInstallationProfile, mpi_type_compatible_with_profile};
-use crate::mpi_util::{advertised_mpi_types, preferred_mpi_type_description};
-use crate::planner::{
-    ExecutionSpec, ImageSource, cache_path_policy_issue, registry_host_for_remote,
-    runtime_root_policy_issue,
+use crate::diagnostics::{
+    CONTEXTUAL_METRICS_COLLECTOR_PREFIX, CONTEXTUAL_PYXIS_HELPER_PREFIX,
+    CONTEXTUAL_TASK_PROLOG_PREFIX,
 };
+use crate::domain::registry_host_for_remote;
+use crate::mpi_util::{advertised_mpi_types, preferred_mpi_type_description};
+use crate::path_util::{cache_path_policy_issue, runtime_root_policy_issue};
+use crate::planner::{ExecutionSpec, ImageSource};
 use crate::process_probe;
-use crate::readiness_util::readiness_uses_implicit_localhost;
+use crate::readiness_analysis::readiness_uses_implicit_localhost;
 use crate::runtime_plan::RuntimePlan;
-use crate::spec::{MetricsCollector, MpiProfile, ReadinessSpec, RuntimeBackend, ScratchScope};
-use crate::term;
+use crate::spec::{MetricsCollector, MpiProfile, ReadinessSpec, RuntimeBackend};
 
-/// Shared findings model, re-exported so existing `preflight::{Item, Level,
-/// Report}` paths keep working after the move to [`crate::diagnostics`] (which
-/// breaks the former cluster <-> preflight import cycle).
-pub use crate::diagnostics::{Item, Level, Report};
+use self::shared_fs_probe::{
+    fs_probe_timeout_from_env, run_shared_fs_probe, shared_fs_probe_targets,
+};
 
-/// Count summary for a grouped preflight report.
-#[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct ReportSummary {
-    pub blockers: usize,
-    pub actionable_warnings: usize,
-    pub contextual_warnings: usize,
-    pub passed_checks: usize,
-}
-
-/// Preflight report grouped into blockers, warnings, and passes.
-#[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct GroupedReport {
-    pub summary: ReportSummary,
-    pub blockers: Vec<Item>,
-    pub actionable_warnings: Vec<Item>,
-    pub contextual_warnings: Vec<Item>,
-    pub passed_checks: Vec<Item>,
-}
+/// Shared findings model, re-exported so existing `preflight::*` report paths
+/// keep working after ownership moved to [`crate::diagnostics`].
+#[allow(unused_imports)]
+pub use crate::diagnostics::{GroupedReport, Item, Level, Report, ReportSummary};
 
 /// Options controlling which tools and checks preflight should require.
 #[allow(missing_docs)]
@@ -87,183 +70,6 @@ impl Default for Options {
 }
 
 const LOW_SPACE_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
-const DEFAULT_FS_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_FS_PROBE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
-const FS_PROBE_TIMEOUT_ENV: &str = "HPC_COMPOSE_FS_PROBE_TIMEOUT_MS";
-const FS_PROBE_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
-const FS_PROBE_CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
-const FS_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(25);
-
-fn fs_probe_timeout_from_env() -> Duration {
-    env::var(FS_PROBE_TIMEOUT_ENV)
-        .ok()
-        .as_deref()
-        .and_then(parse_fs_probe_timeout_ms)
-        .unwrap_or(DEFAULT_FS_PROBE_TIMEOUT)
-}
-
-fn parse_fs_probe_timeout_ms(raw: &str) -> Option<Duration> {
-    let millis = raw.trim().parse::<u64>().ok()?;
-    validate_fs_probe_timeout(Duration::from_millis(millis))
-}
-
-fn validate_fs_probe_timeout(timeout: Duration) -> Option<Duration> {
-    (!timeout.is_zero() && timeout <= MAX_FS_PROBE_TIMEOUT).then_some(timeout)
-}
-
-impl Report {
-    /// Returns `true` when the report contains at least one blocking error.
-    pub fn has_errors(&self) -> bool {
-        self.items.iter().any(|item| item.level == Level::Error)
-    }
-
-    /// Returns `true` when the report contains at least one warning.
-    pub fn has_warnings(&self) -> bool {
-        self.items.iter().any(|item| item.level == Level::Warn)
-    }
-
-    /// Renders the report in the default grouped text format.
-    pub fn render(&self) -> String {
-        self.render_grouped(false)
-    }
-
-    /// Renders the report with passed checks included.
-    pub fn render_verbose(&self) -> String {
-        self.render_grouped(true)
-    }
-
-    /// Returns a grouped representation used by CLI and JSON output.
-    pub fn grouped(&self) -> GroupedReport {
-        let mut blockers = Vec::new();
-        let mut actionable_warnings = Vec::new();
-        let mut contextual_warnings = Vec::new();
-        let mut passed_checks = Vec::new();
-
-        for item in &self.items {
-            match item.level {
-                Level::Error => blockers.push(item.clone()),
-                Level::Warn if is_contextual_warning(item) => {
-                    contextual_warnings.push(item.clone())
-                }
-                Level::Warn => actionable_warnings.push(item.clone()),
-                Level::Ok => passed_checks.push(item.clone()),
-            }
-        }
-
-        GroupedReport {
-            summary: ReportSummary {
-                blockers: blockers.len(),
-                actionable_warnings: actionable_warnings.len(),
-                contextual_warnings: contextual_warnings.len(),
-                passed_checks: passed_checks.len(),
-            },
-            blockers,
-            actionable_warnings,
-            contextual_warnings,
-            passed_checks,
-        }
-    }
-
-    fn render_grouped(&self, verbose: bool) -> String {
-        if self.items.is_empty() {
-            return String::new();
-        }
-
-        let grouped = self.grouped();
-        let blocker_label = if grouped.summary.blockers > 0 {
-            term::styled_error(&grouped.summary.blockers.to_string())
-        } else {
-            grouped.summary.blockers.to_string()
-        };
-        let warn_label = if grouped.summary.actionable_warnings > 0 {
-            term::styled_warning(&grouped.summary.actionable_warnings.to_string())
-        } else {
-            grouped.summary.actionable_warnings.to_string()
-        };
-        let ctx_label = if grouped.summary.contextual_warnings > 0 {
-            term::styled_warning(&grouped.summary.contextual_warnings.to_string())
-        } else {
-            grouped.summary.contextual_warnings.to_string()
-        };
-        let passed_label = term::styled_success(&grouped.summary.passed_checks.to_string());
-        let mut lines = vec![format!(
-            "Summary: {} blocker(s), {} actionable warning(s), {} contextual warning(s), {} passed checks",
-            blocker_label, warn_label, ctx_label, passed_label
-        )];
-
-        if crate::platform::is_macos() && grouped.summary.blockers > 0 {
-            lines.push(
-                "note: macOS is an authoring-only platform; missing Slurm/Enroot runtime tools are expected here. Run from a Linux Slurm login node.".to_string(),
-            );
-        }
-
-        render_section(
-            &mut lines,
-            "Blockers",
-            &grouped.blockers,
-            term::styled_error,
-        );
-        render_section(
-            &mut lines,
-            "Actionable warnings",
-            &grouped.actionable_warnings,
-            term::styled_warning,
-        );
-        render_section(
-            &mut lines,
-            "Contextual warnings",
-            &grouped.contextual_warnings,
-            term::styled_warning,
-        );
-
-        if verbose {
-            render_section(
-                &mut lines,
-                "Passed checks",
-                &grouped.passed_checks,
-                term::styled_success,
-            );
-        } else {
-            lines.push(format!(
-                "Passed checks: {}",
-                term::styled_success(&grouped.summary.passed_checks.to_string())
-            ));
-        }
-
-        lines.join("\n")
-    }
-}
-
-fn render_section(
-    lines: &mut Vec<String>,
-    title: &str,
-    items: &[Item],
-    style_fn: fn(&str) -> String,
-) {
-    if items.is_empty() {
-        return;
-    }
-
-    lines.push(format!("{}:", term::styled_section_header(title)));
-    for item in items {
-        lines.push(format!("- {}", style_fn(&item.message)));
-        if let Some(remediation) = &item.remediation {
-            lines.push(format!(
-                "  {}: {remediation}",
-                term::styled_note("remediation")
-            ));
-        }
-    }
-}
-
-fn is_contextual_warning(item: &Item) -> bool {
-    matches!(item.level, Level::Warn)
-        && (item
-            .message
-            .starts_with("neither /etc/slurm/task_prolog.hk nor /etc/slurm/task_prolog exists")
-            || item.message.starts_with("site Pyxis helper path is")
-            || item.message.starts_with("metrics collector"))
-}
 
 /// Runs all login-node preflight checks for a prepared runtime plan.
 pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
@@ -1022,23 +828,6 @@ fn check_disk_space(report: &mut Report, cache_dir: &Path) {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SharedFsProbeTarget {
-    label: &'static str,
-    path: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SharedFsProbeOutcome {
-    available_bytes: Option<u64>,
-}
-
-#[derive(Debug)]
-struct SharedFsProbeSubmitError {
-    detail: String,
-    submitted_job_id: Option<String>,
-}
-
 fn check_shared_fs_probes(report: &mut Report, plan: &RuntimePlan, options: &Options) {
     let targets = shared_fs_probe_targets(plan);
     if targets.is_empty() {
@@ -1113,402 +902,11 @@ fn check_shared_fs_probes(report: &mut Report, plan: &RuntimePlan, options: &Opt
     }
 }
 
-fn shared_fs_probe_targets(plan: &RuntimePlan) -> Vec<SharedFsProbeTarget> {
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut seen = BTreeSet::new();
-    let mut targets = Vec::new();
-
-    push_shared_fs_probe_target(
-        &mut targets,
-        &mut seen,
-        "cache directory",
-        plan.cache_dir.clone(),
-    );
-
-    if let Some(raw) = plan.slurm.runtime_root.as_deref() {
-        push_shared_fs_probe_target(
-            &mut targets,
-            &mut seen,
-            "runtime root",
-            crate::path_util::absolute_path(Path::new(raw), &cwd),
-        );
-    }
-
-    if let Some(raw) = plan.slurm.resume_dir() {
-        push_shared_fs_probe_target(
-            &mut targets,
-            &mut seen,
-            "resume directory",
-            crate::path_util::absolute_path(Path::new(raw), &cwd),
-        );
-    }
-
-    if let Some(scratch) = &plan.slurm.scratch
-        && scratch.scope == ScratchScope::Shared
-    {
-        push_shared_fs_probe_target(
-            &mut targets,
-            &mut seen,
-            "shared scratch",
-            crate::path_util::absolute_path(Path::new(&scratch.base), &cwd),
-        );
-    }
-
-    targets
-}
-
-fn push_shared_fs_probe_target(
-    targets: &mut Vec<SharedFsProbeTarget>,
-    seen: &mut BTreeSet<PathBuf>,
-    label: &'static str,
-    path: PathBuf,
-) {
-    if seen.insert(path.clone()) {
-        targets.push(SharedFsProbeTarget { label, path });
-    }
-}
-
 fn format_probe_headroom(available_bytes: Option<u64>) -> Option<String> {
     available_bytes.map(|bytes| {
         let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         format!(", compute headroom {gib:.1} GiB")
     })
-}
-
-fn run_shared_fs_probe(
-    target: &SharedFsProbeTarget,
-    sbatch_bin: &str,
-    scancel_bin: &str,
-    timeout: Duration,
-) -> std::result::Result<SharedFsProbeOutcome, String> {
-    fs::create_dir_all(&target.path).map_err(|err| {
-        format!(
-            "failed to create probe parent directory {}: {err}",
-            target.path.display()
-        )
-    })?;
-
-    let probe_id = shared_fs_probe_id();
-    let probe_root = target
-        .path
-        .join(format!(".hpc-compose-fs-probe-{probe_id}"));
-    fs::create_dir_all(&probe_root).map_err(|err| {
-        format!(
-            "failed to create probe directory {}: {err}",
-            probe_root.display()
-        )
-    })?;
-
-    let login_token = format!("login:{probe_id}");
-    fs::write(
-        probe_root.join("login-sentinel"),
-        format!("{login_token}\n"),
-    )
-    .map_err(|err| {
-        format!(
-            "failed to write login sentinel in {}: {err}",
-            probe_root.display()
-        )
-    })?;
-
-    let script_path = probe_root.join("probe.sbatch");
-    let script = render_shared_fs_probe_script(&probe_root, &login_token);
-    crate::secure_io::write(&script_path, script, true).map_err(|err| {
-        format!(
-            "failed to write probe script {}: {err}",
-            script_path.display()
-        )
-    })?;
-
-    let result_path = probe_root.join("result.env");
-    let started = Instant::now();
-    let Some(deadline) = started.checked_add(timeout) else {
-        return Err(format!(
-            "shared filesystem probe timeout is too large; probe files left at {}",
-            probe_root.display()
-        ));
-    };
-    let job_id = match submit_shared_fs_probe(sbatch_bin, &script_path, deadline, timeout) {
-        Ok(job_id) => job_id,
-        Err(submit_error) => {
-            let mut message = submit_error.detail;
-            if let Some(job_id) = submit_error.submitted_job_id {
-                append_probe_cancellation(&mut message, scancel_bin, &job_id);
-            }
-            if let Some(probe_message) = read_failed_probe_message(&probe_root) {
-                message.push_str(&format!("; probe reported: {probe_message}"));
-            }
-            message.push_str(&format!("; probe files left at {}", probe_root.display()));
-            return Err(message);
-        }
-    };
-
-    while !result_path.exists() {
-        if Instant::now() >= deadline {
-            let mut message = format!(
-                "shared filesystem probe job {job_id} timed out after {:.1}s",
-                timeout.as_secs_f64()
-            );
-            append_probe_cancellation(&mut message, scancel_bin, &job_id);
-            message.push_str(&format!("; probe files left at {}", probe_root.display()));
-            return Err(message);
-        }
-        thread::sleep(
-            FS_PROBE_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
-        );
-    }
-
-    let raw = fs::read_to_string(&result_path).map_err(|err| {
-        format!(
-            "failed to read probe result {}: {err}; probe files left at {}",
-            result_path.display(),
-            probe_root.display()
-        )
-    })?;
-    let outcome = parse_shared_fs_probe_result(&raw).map_err(|err| {
-        format!(
-            "probe reported: {err}; probe files left at {}",
-            probe_root.display()
-        )
-    })?;
-
-    let compute_sentinel = probe_root.join("compute-sentinel");
-    let compute_payload = fs::read_to_string(&compute_sentinel).map_err(|err| {
-        format!(
-            "login node could not read compute sentinel {}: {err}; probe files left at {}",
-            compute_sentinel.display(),
-            probe_root.display()
-        )
-    })?;
-    if !compute_payload.starts_with("compute:") {
-        return Err(format!(
-            "compute sentinel had unexpected contents in {}; probe files left at {}",
-            compute_sentinel.display(),
-            probe_root.display()
-        ));
-    }
-
-    let _ = fs::remove_dir_all(&probe_root);
-    Ok(outcome)
-}
-
-fn submit_shared_fs_probe(
-    sbatch_bin: &str,
-    script_path: &Path,
-    deadline: Instant,
-    timeout: Duration,
-) -> std::result::Result<String, SharedFsProbeSubmitError> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err(SharedFsProbeSubmitError {
-            detail: format!(
-                "shared filesystem sbatch probe timed out after {:.1}s at '{sbatch_bin}'",
-                timeout.as_secs_f64()
-            ),
-            submitted_job_id: None,
-        });
-    }
-
-    // Keep acceptance separate from result polling so the scheduler job ID is
-    // available for bounded cleanup instead of delegating the wait to sbatch.
-    let mut command = Command::new(sbatch_bin);
-    command.arg("--parsable").arg(script_path);
-    match process_probe::run(
-        &mut command,
-        "shared filesystem sbatch probe",
-        process_probe::ProbeOptions {
-            timeout: remaining,
-            max_output_bytes: FS_PROBE_MAX_OUTPUT_BYTES,
-        },
-    ) {
-        Ok(output) => {
-            let submitted_job_id = parse_sbatch_job_id(&output.stdout);
-            if !output.status.success() {
-                return Err(SharedFsProbeSubmitError {
-                    detail: format!(
-                        "sbatch --parsable exited with {}{}",
-                        output.status,
-                        format_probe_output_detail("stderr", &output.stderr)
-                    ),
-                    submitted_job_id,
-                });
-            }
-            submitted_job_id.ok_or_else(|| SharedFsProbeSubmitError {
-                detail: format!(
-                    "sbatch --parsable did not publish a numeric job ID{}",
-                    format_probe_output_detail("stdout", &output.stdout)
-                ),
-                submitted_job_id: None,
-            })
-        }
-        Err(err) => {
-            let submitted_job_id = parse_sbatch_job_id(err.captured_stdout());
-            let mut detail = err.detail();
-            let stderr = format_probe_output_detail("stderr", err.captured_stderr());
-            if !stderr.is_empty() {
-                detail.push_str(&stderr);
-            }
-            let (stdout_truncated, stderr_truncated) = err.captured_output_truncated();
-            if stdout_truncated || stderr_truncated {
-                detail.push_str("; captured output was truncated");
-            }
-            Err(SharedFsProbeSubmitError {
-                detail,
-                submitted_job_id,
-            })
-        }
-    }
-}
-
-fn append_probe_cancellation(message: &mut String, scancel_bin: &str, job_id: &str) {
-    let mut command = Command::new(scancel_bin);
-    command.arg(job_id);
-    match process_probe::run(
-        &mut command,
-        "shared filesystem probe cancellation",
-        process_probe::ProbeOptions {
-            timeout: FS_PROBE_CANCEL_TIMEOUT,
-            max_output_bytes: FS_PROBE_MAX_OUTPUT_BYTES,
-        },
-    ) {
-        Ok(output) if output.status.success() => {
-            message.push_str(&format!("; canceled submitted job {job_id}"));
-        }
-        Ok(output) => {
-            message.push_str(&format!(
-                "; failed to cancel submitted job {job_id}: scancel exited with {}{}",
-                output.status,
-                format_probe_output_detail("stderr", &output.stderr)
-            ));
-        }
-        Err(err) => {
-            message.push_str(&format!(
-                "; failed to cancel submitted job {job_id}: {}",
-                err.detail()
-            ));
-        }
-    }
-}
-
-fn format_probe_output_detail(label: &str, bytes: &[u8]) -> String {
-    let detail = String::from_utf8_lossy(bytes);
-    let detail = detail.trim();
-    if detail.is_empty() {
-        String::new()
-    } else {
-        format!(": {label}: {detail}")
-    }
-}
-
-fn parse_sbatch_job_id(stdout: &[u8]) -> Option<String> {
-    String::from_utf8_lossy(stdout)
-        .lines()
-        .find_map(parse_sbatch_job_id_line)
-}
-
-fn parse_sbatch_job_id_line(line: &str) -> Option<String> {
-    let candidate = line
-        .trim()
-        .split_once(';')
-        .map_or(line.trim(), |(id, _)| id);
-    (!candidate.is_empty() && candidate.bytes().all(|byte| byte.is_ascii_digit()))
-        .then(|| candidate.to_string())
-}
-
-fn read_failed_probe_message(probe_root: &Path) -> Option<String> {
-    let raw = fs::read_to_string(probe_root.join("result.env")).ok()?;
-    raw.lines()
-        .find_map(|line| line.strip_prefix("message="))
-        .map(str::to_string)
-}
-
-fn shared_fs_probe_id() -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default();
-    format!("{}-{millis}", std::process::id())
-}
-
-fn render_shared_fs_probe_script(probe_root: &Path, login_token: &str) -> String {
-    let probe_root = crate::shell_quote::quote(&probe_root.display().to_string());
-    let login_token = crate::shell_quote::quote(login_token);
-    format!(
-        r#"#!/bin/bash
-#SBATCH --job-name=hpc-compose-fs-probe
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --time=00:01:00
-
-set -euo pipefail
-
-PROBE_ROOT={probe_root}
-LOGIN_TOKEN={login_token}
-RESULT="$PROBE_ROOT/result.env"
-
-fail() {{
-  tmp_result="$RESULT.tmp.$$"
-  printf 'status=error\nmessage=%s\n' "$1" > "$tmp_result"
-  mv "$tmp_result" "$RESULT"
-  exit 1
-}}
-
-login_sentinel="$PROBE_ROOT/login-sentinel"
-[[ -f "$login_sentinel" ]] || fail "login sentinel is not visible on the compute node"
-observed="$(cat "$login_sentinel")"
-[[ "$observed" == "$LOGIN_TOKEN" ]] || fail "login sentinel contents changed before compute read"
-
-compute_tmp="$PROBE_ROOT/compute-sentinel.tmp"
-compute_final="$PROBE_ROOT/compute-sentinel"
-printf 'compute:%s\n' "${{SLURM_JOB_ID:-unknown}}" > "$compute_tmp"
-mv "$compute_tmp" "$compute_final"
-[[ -f "$compute_final" ]] || fail "compute-to-login rename target was not created"
-
-rename_tmp="$PROBE_ROOT/rename.tmp"
-rename_final="$PROBE_ROOT/rename.final"
-printf 'rename-ok\n' > "$rename_tmp"
-mv "$rename_tmp" "$rename_final"
-[[ "$(cat "$rename_final")" == "rename-ok" ]] || fail "rename atomicity check read unexpected contents"
-
-available_kb=""
-if command -v df >/dev/null 2>&1; then
-  available_kb="$(df -Pk "$PROBE_ROOT" 2>/dev/null | awk 'NR==2 {{print $4}}')" || available_kb=""
-fi
-
-tmp_result="$RESULT.tmp"
-printf 'status=ok\navailable_kb=%s\n' "$available_kb" > "$tmp_result"
-mv "$tmp_result" "$RESULT"
-"#
-    )
-}
-
-fn parse_shared_fs_probe_result(raw: &str) -> std::result::Result<SharedFsProbeOutcome, String> {
-    let mut status = None;
-    let mut message = None;
-    let mut available_kb = None;
-
-    for line in raw.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        match key {
-            "status" => status = Some(value.to_string()),
-            "message" => message = Some(value.to_string()),
-            "available_kb" if !value.trim().is_empty() => {
-                available_kb = value.trim().parse::<u64>().ok();
-            }
-            _ => {}
-        }
-    }
-
-    match status.as_deref() {
-        Some("ok") => Ok(SharedFsProbeOutcome {
-            available_bytes: available_kb.and_then(|kb| kb.checked_mul(1024)),
-        }),
-        Some("error") => Err(message.unwrap_or_else(|| "probe reported an unknown error".into())),
-        Some(other) => Err(format!("probe reported unexpected status '{other}'")),
-        None => Err("probe result did not include a status".to_string()),
-    }
 }
 
 fn check_resume_path(report: &mut Report, plan: &RuntimePlan) {
@@ -1629,8 +1027,10 @@ fn check_metrics_collectors(report: &mut Report, plan: &RuntimePlan) {
                 check_optional_binary(
                     report,
                     "nvidia-smi",
-                    "metrics collector 'gpu' can query nvidia-smi",
-                    "metrics collector 'gpu' requested but 'nvidia-smi' was not found on this node",
+                    &format!("{CONTEXTUAL_METRICS_COLLECTOR_PREFIX} 'gpu' can query nvidia-smi"),
+                    &format!(
+                        "{CONTEXTUAL_METRICS_COLLECTOR_PREFIX} 'gpu' requested but 'nvidia-smi' was not found on this node"
+                    ),
                     "GPU metrics are best-effort. This is expected on some login nodes; verify that compute nodes providing GPUs also provide nvidia-smi if you want runtime GPU telemetry.",
                 );
             }
@@ -1638,8 +1038,10 @@ fn check_metrics_collectors(report: &mut Report, plan: &RuntimePlan) {
                 check_optional_binary(
                     report,
                     "sstat",
-                    "metrics collector 'slurm' can query sstat",
-                    "metrics collector 'slurm' requested but 'sstat' was not found on this node",
+                    &format!("{CONTEXTUAL_METRICS_COLLECTOR_PREFIX} 'slurm' can query sstat"),
+                    &format!(
+                        "{CONTEXTUAL_METRICS_COLLECTOR_PREFIX} 'slurm' requested but 'sstat' was not found on this node"
+                    ),
                     "Step-level CPU and memory telemetry is best-effort. This is expected on some login nodes; verify that compute nodes provide sstat and that Slurm accounting is enabled if you want runtime stats.",
                 );
             }
@@ -1888,7 +1290,7 @@ fn check_haicore_mount_helpers_with_paths(
     } else {
         report.items.push(Item {
             level: Level::Warn,
-            message: "neither /etc/slurm/task_prolog.hk nor /etc/slurm/task_prolog exists on this node".to_string(),
+            message: format!("{CONTEXTUAL_TASK_PROLOG_PREFIX} on this node"),
             remediation: Some("This is expected on non-cluster machines; on sites whose Pyxis setup relies on a task_prolog helper mount, verify the required path.".to_string()),
         });
     }
@@ -1897,13 +1299,16 @@ fn check_haicore_mount_helpers_with_paths(
         if p.exists() {
             report.items.push(Item {
                 level: Level::Ok,
-                message: format!("site Pyxis helper path is present: {}", p.display()),
+                message: format!("{CONTEXTUAL_PYXIS_HELPER_PREFIX} present: {}", p.display()),
                 remediation: None,
             });
         } else {
             report.items.push(Item {
                 level: Level::Warn,
-                message: format!("site Pyxis helper path is absent on this node: {}", p.display()),
+                message: format!(
+                    "{CONTEXTUAL_PYXIS_HELPER_PREFIX} absent on this node: {}",
+                    p.display()
+                ),
                 remediation: Some("This is only a problem on the actual cluster if Pyxis requires this helper mount.".to_string()),
             });
         }
@@ -1921,7 +1326,7 @@ fn check_registry_credentials(report: &mut Report, plan: &RuntimePlan) {
         let ImageSource::Remote(remote) = &service.source else {
             continue;
         };
-        let registry = registry_for_remote(remote);
+        let registry = registry_host_for_remote(remote);
         match registry.as_str() {
             "registry-1.docker.io" => {
                 if entries.contains("registry-1.docker.io") {
@@ -2020,10 +1425,6 @@ fn find_binary(binary: &str) -> Option<PathBuf> {
     process_probe::resolve_executable(binary).ok()
 }
 
-fn registry_for_remote(remote: &str) -> String {
-    registry_host_for_remote(remote)
-}
-
 fn enroot_credentials_path() -> Option<PathBuf> {
     if let Ok(config_path) = env::var("ENROOT_CONFIG_PATH") {
         return Some(PathBuf::from(config_path).join(".credentials"));
@@ -2104,10 +1505,8 @@ mod tests {
     use crate::runtime_plan::RuntimeService;
     use crate::spec::{
         MetricsCollector, MetricsConfig, MpiConfig, MpiProfile, MpiType, ReadinessSpec,
-        ResumeConfig, ScratchConfig, ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,
+        ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig,
     };
-
-    const PROBE_TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
     fn runtime_plan(tmpdir: &Path) -> RuntimePlan {
         RuntimePlan {
@@ -2147,105 +1546,10 @@ mod tests {
         fs::set_permissions(path, perms).expect("chmod");
     }
 
-    fn write_fake_sbatch_submit(path: &Path) {
-        write_fake_binary(
-            path,
-            r#"#!/bin/bash
-set -euo pipefail
-script_path=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --parsable)
-      shift
-      ;;
-    --*)
-      shift
-      ;;
-    *)
-      script_path="$1"
-      shift
-      ;;
-  esac
-done
-if [[ -z "$script_path" ]]; then
-  echo "missing script path" >&2
-  exit 2
-fi
-export SLURM_JOB_ID=999
-bash "$script_path" >/dev/null 2>&1 &
-echo "999;test-cluster"
-"#,
-        );
-    }
-
-    #[test]
-    fn shared_fs_probe_targets_cover_shared_paths_and_deduplicate() {
-        let tmpdir = tempfile::tempdir().expect("tmpdir");
-        let mut plan = runtime_plan(tmpdir.path());
-        let cache = plan.cache_dir.clone();
-        let scratch = tmpdir.path().join("scratch");
-        plan.slurm.runtime_root = Some(cache.display().to_string());
-        plan.slurm.resume = Some(ResumeConfig {
-            path: cache.display().to_string(),
-        });
-        plan.slurm.scratch = Some(ScratchConfig {
-            scope: ScratchScope::Shared,
-            base: scratch.display().to_string(),
-            mount: "/scratch".to_string(),
-            cleanup: Default::default(),
-        });
-
-        let targets = shared_fs_probe_targets(&plan);
-
-        assert_eq!(targets.len(), 2, "deduplicated targets: {targets:#?}");
-        assert_eq!(targets[0].label, "cache directory");
-        assert_eq!(targets[0].path, cache);
-        assert_eq!(targets[1].label, "shared scratch");
-        assert_eq!(targets[1].path, scratch);
-    }
-
-    #[test]
-    fn shared_fs_probe_runner_submits_parsable_probe_and_cleans_success() {
-        let tmpdir = tempfile::tempdir().expect("tmpdir");
-        let target = SharedFsProbeTarget {
-            label: "cache directory",
-            path: tmpdir.path().join("cache"),
-        };
-        let sbatch = tmpdir.path().join("sbatch");
-        write_fake_sbatch_submit(&sbatch);
-
-        let outcome = run_shared_fs_probe(
-            &target,
-            sbatch.to_str().expect("path"),
-            "scancel",
-            PROBE_TEST_TIMEOUT,
-        )
-        .expect("probe should pass");
-
-        assert!(
-            outcome.available_bytes.is_some_and(|bytes| bytes > 0),
-            "compute-side df should report available bytes, got {outcome:#?}"
-        );
-        let leftovers = fs::read_dir(&target.path)
-            .expect("read target")
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert!(
-            leftovers
-                .iter()
-                .all(|name| !name.starts_with(".hpc-compose-fs-probe-")),
-            "successful probe should clean its probe directory, left: {leftovers:?}"
-        );
-    }
-
     #[test]
     fn shared_fs_probe_failure_becomes_preflight_error() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
-        let target = SharedFsProbeTarget {
-            label: "cache directory",
-            path: tmpdir.path().join("cache"),
-        };
+        let cache_dir = tmpdir.path().join("cache");
         let sbatch = tmpdir.path().join("sbatch-fail");
         let scancel = tmpdir.path().join("scancel");
         write_fake_binary(
@@ -2254,7 +1558,7 @@ echo "999;test-cluster"
         );
         write_fake_binary(&scancel, "#!/bin/bash\nexit 0\n");
         let mut plan = runtime_plan(tmpdir.path());
-        plan.cache_dir = target.path.clone();
+        plan.cache_dir = cache_dir;
 
         let mut report = Report { items: Vec::new() };
         check_shared_fs_probes(
@@ -2277,214 +1581,22 @@ echo "999;test-cluster"
         }));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn shared_fs_probe_preserves_compute_report_and_evidence_on_failure() {
-        let tmpdir = tempfile::tempdir().expect("tmpdir");
-        let target = SharedFsProbeTarget {
-            label: "cache directory",
-            path: tmpdir.path().join("cache"),
+    fn preflight_report_reexports_preserve_grouped_policy() {
+        let report = Report {
+            items: vec![Item {
+                level: Level::Warn,
+                message: "metrics collector remains contextual".into(),
+                remediation: None,
+            }],
         };
-        let sbatch = tmpdir.path().join("sbatch-compute-fail");
-        write_fake_binary(
-            &sbatch,
-            r#"#!/bin/bash
-set -euo pipefail
-script_path="${@: -1}"
-rm -f "$(dirname "$script_path")/login-sentinel"
-export SLURM_JOB_ID=777
-bash "$script_path" >/dev/null 2>&1 &
-echo "777;test-cluster"
-"#,
-        );
-
-        let err = run_shared_fs_probe(
-            &target,
-            sbatch.to_str().expect("path"),
-            "scancel",
-            PROBE_TEST_TIMEOUT,
-        )
-        .expect_err("compute-side probe failure must be reported");
-
-        assert!(
-            err.contains("login sentinel is not visible on the compute node"),
-            "missing compute diagnostic: {err}"
-        );
-        assert!(
-            err.contains("probe files left at"),
-            "missing evidence: {err}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn shared_fs_probe_deadline_cancels_published_job_and_kills_submit_descendants() {
-        let tmpdir = tempfile::tempdir().expect("tmpdir");
-        let target = SharedFsProbeTarget {
-            label: "cache directory",
-            path: tmpdir.path().join("cache"),
-        };
-        let sbatch = tmpdir.path().join("sbatch-hang");
-        let scancel = tmpdir.path().join("scancel");
-        let scancel_log = tmpdir.path().join("scancel.log");
-        let descendant_heartbeat = tmpdir.path().join("descendant-heartbeat");
-        write_fake_binary(
-            &sbatch,
-            &format!(
-                "#!/bin/bash\nset -euo pipefail\n(while true; do printf x >> {heartbeat}; sleep 0.05; done) &\nwhile [[ ! -s {heartbeat} ]]; do sleep 0.01; done\necho '999;test-cluster'\nsleep 30\n",
-                heartbeat = crate::shell_quote::quote(&descendant_heartbeat.display().to_string())
-            ),
-        );
-        write_fake_binary(
-            &scancel,
-            &format!(
-                "#!/bin/bash\nprintf '%s\\n' \"$*\" > {}\n",
-                crate::shell_quote::quote(&scancel_log.display().to_string())
-            ),
-        );
-
-        let started = std::time::Instant::now();
-        let err = run_shared_fs_probe(
-            &target,
-            sbatch.to_str().expect("path"),
-            scancel.to_str().expect("path"),
-            PROBE_TEST_TIMEOUT,
-        )
-        .expect_err("hung scheduler probe must time out");
-        let elapsed = started.elapsed();
-
-        assert!(
-            elapsed < PROBE_TEST_TIMEOUT + Duration::from_secs(2),
-            "probe ignored its client deadline and ran for {elapsed:?}"
-        );
-        assert!(err.contains("timed out"), "unexpected error: {err}");
+        let grouped: GroupedReport = report.grouped();
+        let summary: &ReportSummary = &grouped.summary;
+        assert_eq!(summary.contextual_warnings, 1);
         assert_eq!(
-            fs::read_to_string(&scancel_log).unwrap_or_else(|read_err| panic!(
-                "scancel invocation missing ({read_err}); {err}"
-            )),
-            "999\n",
-            "the accepted allocation must be canceled by its parsed job ID"
+            grouped.contextual_warnings[0].message,
+            report.items[0].message
         );
-        let heartbeat_before = fs::metadata(&descendant_heartbeat)
-            .expect("descendant heartbeat")
-            .len();
-        std::thread::sleep(Duration::from_millis(300));
-        let heartbeat_after = fs::metadata(&descendant_heartbeat)
-            .expect("descendant heartbeat after cleanup")
-            .len();
-        assert_eq!(
-            heartbeat_after, heartbeat_before,
-            "the timed-out sbatch process group left a heartbeat descendant alive"
-        );
-        assert!(
-            err.contains("probe files left at"),
-            "missing evidence path: {err}"
-        );
-        assert!(
-            fs::read_dir(&target.path)
-                .expect("probe target")
-                .filter_map(Result::ok)
-                .any(|entry| entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".hpc-compose-fs-probe-")),
-            "timed-out probe should retain its evidence directory"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn shared_fs_probe_cancels_published_job_after_submit_output_limit() {
-        let tmpdir = tempfile::tempdir().expect("tmpdir");
-        let target = SharedFsProbeTarget {
-            label: "cache directory",
-            path: tmpdir.path().join("cache"),
-        };
-        let sbatch = tmpdir.path().join("sbatch-verbose");
-        let scancel = tmpdir.path().join("scancel");
-        let scancel_log = tmpdir.path().join("scancel.log");
-        write_fake_binary(
-            &sbatch,
-            "#!/bin/bash\nset -euo pipefail\nprintf '999;test-cluster\\n'\nhead -c 1048576 /dev/zero\n",
-        );
-        write_fake_binary(
-            &scancel,
-            &format!(
-                "#!/bin/bash\nprintf '%s\\n' \"$*\" > {}\n",
-                crate::shell_quote::quote(&scancel_log.display().to_string())
-            ),
-        );
-
-        let err = run_shared_fs_probe(
-            &target,
-            sbatch.to_str().expect("path"),
-            scancel.to_str().expect("path"),
-            PROBE_TEST_TIMEOUT,
-        )
-        .expect_err("oversized submit output must fail safely");
-
-        assert!(err.contains("capture limit"), "unexpected error: {err}");
-        assert_eq!(
-            fs::read_to_string(scancel_log).expect("scancel invocation"),
-            "999\n",
-            "accepted probe allocation must be canceled even when submit output is oversized"
-        );
-    }
-
-    #[test]
-    fn parse_shared_fs_probe_result_reports_status_and_headroom() {
-        let outcome =
-            parse_shared_fs_probe_result("status=ok\navailable_kb=2048\n").expect("ok result");
-        assert_eq!(outcome.available_bytes, Some(2 * 1024 * 1024));
-
-        let err = parse_shared_fs_probe_result("status=error\nmessage=not visible\n")
-            .expect_err("error result");
-        assert_eq!(err, "not visible");
-    }
-
-    #[test]
-    fn filesystem_probe_timeout_parsers_require_bounded_nonzero_values() {
-        assert_eq!(
-            parse_fs_probe_timeout_ms("250"),
-            Some(Duration::from_millis(250))
-        );
-        assert_eq!(parse_fs_probe_timeout_ms("0"), None);
-        assert_eq!(parse_fs_probe_timeout_ms("not-a-number"), None);
-        assert_eq!(
-            parse_fs_probe_timeout_ms(&(MAX_FS_PROBE_TIMEOUT.as_millis() + 1).to_string()),
-            None
-        );
-    }
-
-    #[test]
-    fn parsable_sbatch_output_accepts_job_id_and_optional_cluster_only() {
-        assert_eq!(parse_sbatch_job_id(b"12345\n"), Some("12345".into()));
-        assert_eq!(parse_sbatch_job_id(b"12345;site-a\n"), Some("12345".into()));
-        assert_eq!(parse_sbatch_job_id(b"Submitted batch job 12345\n"), None);
-        assert_eq!(parse_sbatch_job_id(b"--other-option\n"), None);
-    }
-
-    #[test]
-    fn is_contextual_warning_matches_only_known_warn_prefixes() {
-        let warn = |message: &str| Item {
-            level: Level::Warn,
-            message: message.to_string(),
-            remediation: None,
-        };
-        assert!(is_contextual_warning(&warn(
-            "site Pyxis helper path is /opt/missing"
-        )));
-        assert!(is_contextual_warning(&warn(
-            "metrics collector nvidia-smi not found on host"
-        )));
-        // Same message but at Error level is not "contextual".
-        assert!(!is_contextual_warning(&Item {
-            level: Level::Error,
-            message: "metrics collector missing".to_string(),
-            remediation: None,
-        }));
-        // An unrelated warning is not contextual.
-        assert!(!is_contextual_warning(&warn("something else entirely")));
     }
 
     #[test]
@@ -3154,9 +2266,75 @@ echo "777;test-cluster"
             &tmpdir.path().join("fallback"),
             &[&helper_a, &helper_b, &helper_c],
         );
-        let text = report.render_verbose();
-        assert!(text.contains("found a Slurm task_prolog helper mount"));
-        assert!(text.contains("site Pyxis helper path is present"));
+        assert_eq!(report.items.len(), 4);
+        assert_eq!(report.items[0].level, Level::Ok);
+        assert_eq!(
+            report.items[0].message,
+            "found a Slurm task_prolog helper mount used by Pyxis sites"
+        );
+        assert_eq!(report.items[0].remediation, None);
+        for (item, path) in report.items[1..]
+            .iter()
+            .zip([&helper_a, &helper_b, &helper_c])
+        {
+            assert_eq!(item.level, Level::Ok);
+            assert_eq!(
+                item.message,
+                format!("site Pyxis helper path is present: {}", path.display())
+            );
+            assert_eq!(item.remediation, None);
+        }
+    }
+
+    #[test]
+    fn haicore_missing_helpers_preserve_exact_order_messages_and_remediations() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let helper_a = tmpdir.path().join("scratch");
+        let helper_b = tmpdir.path().join("libslurmfull.so");
+        let helper_c = tmpdir.path().join("libhwloc.so.15");
+        let mut report = Report { items: Vec::new() };
+
+        check_haicore_mount_helpers_with_paths(
+            &mut report,
+            &tmpdir.path().join("task_prolog.hk"),
+            &tmpdir.path().join("task_prolog"),
+            &[&helper_a, &helper_b, &helper_c],
+        );
+
+        assert_eq!(report.items.len(), 4);
+        assert_eq!(report.items[0].level, Level::Warn);
+        assert_eq!(
+            report.items[0].message,
+            "neither /etc/slurm/task_prolog.hk nor /etc/slurm/task_prolog exists on this node"
+        );
+        assert_eq!(
+            report.items[0].remediation.as_deref(),
+            Some(
+                "This is expected on non-cluster machines; on sites whose Pyxis setup relies on a task_prolog helper mount, verify the required path."
+            )
+        );
+        for (item, path) in report.items[1..]
+            .iter()
+            .zip([&helper_a, &helper_b, &helper_c])
+        {
+            assert_eq!(item.level, Level::Warn);
+            assert_eq!(
+                item.message,
+                format!(
+                    "site Pyxis helper path is absent on this node: {}",
+                    path.display()
+                )
+            );
+            assert_eq!(
+                item.remediation.as_deref(),
+                Some(
+                    "This is only a problem on the actual cluster if Pyxis requires this helper mount."
+                )
+            );
+        }
+        let grouped = report.grouped();
+        assert_eq!(grouped.contextual_warnings.len(), 4);
+        assert!(grouped.actionable_warnings.is_empty());
     }
 
     #[test]
@@ -3177,15 +2355,79 @@ echo "777;test-cluster"
         let mut report = Report { items: Vec::new() };
         check_metrics_collectors(&mut report, &plan);
         let grouped = report.grouped();
+        assert_eq!(report.items.len(), 2);
         assert_eq!(grouped.contextual_warnings.len(), 2);
-        assert!(grouped.contextual_warnings.iter().any(|item| {
-            item.message
-                .contains("metrics collector 'gpu' requested but 'nvidia-smi' was not found")
-        }));
-        assert!(grouped.contextual_warnings.iter().any(|item| {
-            item.message
-                .contains("metrics collector 'slurm' requested but 'sstat' was not found")
-        }));
+        assert!(grouped.actionable_warnings.is_empty());
+        assert_eq!(report.items[0].level, Level::Warn);
+        assert_eq!(
+            report.items[0].message,
+            "metrics collector 'gpu' requested but 'nvidia-smi' was not found on this node"
+        );
+        assert_eq!(
+            report.items[0].remediation.as_deref(),
+            Some(
+                "GPU metrics are best-effort. This is expected on some login nodes; verify that compute nodes providing GPUs also provide nvidia-smi if you want runtime GPU telemetry."
+            )
+        );
+        assert_eq!(report.items[1].level, Level::Warn);
+        assert_eq!(
+            report.items[1].message,
+            "metrics collector 'slurm' requested but 'sstat' was not found on this node"
+        );
+        assert_eq!(
+            report.items[1].remediation.as_deref(),
+            Some(
+                "Step-level CPU and memory telemetry is best-effort. This is expected on some login nodes; verify that compute nodes provide sstat and that Slurm accounting is enabled if you want runtime stats."
+            )
+        );
+
+        match old_path {
+            Some(path) => unsafe { env::set_var("PATH", path) },
+            None => unsafe { env::remove_var("PATH") },
+        }
+    }
+
+    #[test]
+    fn available_metrics_collectors_preserve_exact_order_and_messages() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let _guard = env_lock().lock().expect("lock");
+        let nvidia_smi = tmpdir.path().join("nvidia-smi");
+        let sstat = tmpdir.path().join("sstat");
+        write_fake_binary(&nvidia_smi, "#!/bin/bash\nexit 0\n");
+        write_fake_binary(&sstat, "#!/bin/bash\nexit 0\n");
+        let old_path = env::var_os("PATH");
+        unsafe {
+            env::set_var("PATH", tmpdir.path());
+        }
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.slurm.metrics = Some(MetricsConfig {
+            enabled: Some(true),
+            interval_seconds: Some(5),
+            collectors: vec![MetricsCollector::Gpu, MetricsCollector::Slurm],
+        });
+
+        let mut report = Report { items: Vec::new() };
+        check_metrics_collectors(&mut report, &plan);
+
+        assert_eq!(report.items.len(), 2);
+        assert_eq!(report.items[0].level, Level::Ok);
+        assert_eq!(
+            report.items[0].message,
+            format!(
+                "metrics collector 'gpu' can query nvidia-smi: {}",
+                nvidia_smi.display()
+            )
+        );
+        assert_eq!(report.items[0].remediation, None);
+        assert_eq!(report.items[1].level, Level::Ok);
+        assert_eq!(
+            report.items[1].message,
+            format!(
+                "metrics collector 'slurm' can query sstat: {}",
+                sstat.display()
+            )
+        );
+        assert_eq!(report.items[1].remediation, None);
 
         match old_path {
             Some(path) => unsafe { env::set_var("PATH", path) },
@@ -3287,7 +2529,7 @@ echo "777;test-cluster"
         assert!(entries.contains("registry.scc.kit.edu"));
         assert!(entries.contains("ghcr.io"));
         assert_eq!(
-            registry_for_remote("docker://redis:7"),
+            registry_host_for_remote("docker://redis:7"),
             "registry-1.docker.io"
         );
         assert_eq!(host_path_from_mount("/tmp/a:/b"), "/tmp/a");

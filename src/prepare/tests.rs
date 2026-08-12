@@ -1,6 +1,11 @@
+use std::cell::RefCell;
 use std::env;
 use std::fs;
+use std::io::{BufReader, Cursor};
 use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
+use std::rc::Rc;
+use std::thread::{self, ThreadId};
 
 use super::*;
 use crate::planner::{
@@ -342,6 +347,124 @@ fn shell_quote_for_test(value: &str) -> String {
     format!("'{escaped}'")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecordedPrepareEvent {
+    Started {
+        service: String,
+        phase: String,
+        thread: ThreadId,
+    },
+    Output {
+        service: String,
+        line: String,
+        thread: ThreadId,
+    },
+    Bytes {
+        service: String,
+        bytes: u64,
+        thread: ThreadId,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+struct RecordingReporter {
+    events: Rc<RefCell<Vec<RecordedPrepareEvent>>>,
+}
+
+impl RecordingReporter {
+    fn events(&self) -> Vec<RecordedPrepareEvent> {
+        self.events.borrow().clone()
+    }
+}
+
+impl PrepareReporter for RecordingReporter {
+    fn step_started(&self, service: &str, phase: &str) {
+        self.events
+            .borrow_mut()
+            .push(RecordedPrepareEvent::Started {
+                service: service.to_string(),
+                phase: phase.to_string(),
+                thread: thread::current().id(),
+            });
+    }
+
+    fn step_output(&self, service: &str, line: &str) {
+        self.events.borrow_mut().push(RecordedPrepareEvent::Output {
+            service: service.to_string(),
+            line: line.to_string(),
+            thread: thread::current().id(),
+        });
+    }
+
+    fn step_bytes(&self, service: &str, bytes: u64) {
+        self.events.borrow_mut().push(RecordedPrepareEvent::Bytes {
+            service: service.to_string(),
+            bytes,
+            thread: thread::current().id(),
+        });
+    }
+}
+
+fn stream_test_command(script: &str) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", script]);
+    command
+}
+
+fn assert_runtime_artifact_status(
+    summary: &PrepareSummary,
+    expected_action: ArtifactAction,
+    expected_note: Option<&str>,
+) {
+    let status = &summary
+        .services
+        .first()
+        .expect("prepared service")
+        .runtime_image;
+    assert_eq!(status.action, expected_action);
+    assert_eq!(status.note.as_deref(), expected_note);
+}
+
+fn fake_sif_prepared_plan(root: &Path, forced_by_mounts: bool) -> RuntimePlan {
+    fs::create_dir_all(root).expect("sif fixture root");
+    let local_sif = root.join("base.sif");
+    fs::write(&local_sif, "sif").expect("local sif");
+    RuntimePlan {
+        name: "demo".into(),
+        cache_dir: root.join("cache"),
+        runtime: RuntimeConfig {
+            backend: RuntimeBackend::Apptainer,
+            ..RuntimeConfig::default()
+        },
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![RuntimeService {
+            name: "svc".into(),
+            runtime_image: root.join("cache/prepared/svc.sif"),
+            execution: ExecutionSpec::Shell("echo ready".into()),
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            assertions: None,
+            failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
+            slurm: ServiceSlurmConfig::default(),
+            prepare: Some(PreparedImageSpec {
+                commands: vec!["echo setup".into()],
+                mounts: forced_by_mounts
+                    .then(|| "/host:/mnt".to_string())
+                    .into_iter()
+                    .collect(),
+                env: Vec::new(),
+                root: true,
+                force_rebuild: forced_by_mounts,
+            }),
+            source: ImageSource::LocalSif(local_sif),
+        }],
+    }
+}
+
 #[test]
 fn prepare_pipeline_imports_and_exports() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
@@ -623,6 +746,147 @@ exit 47
 }
 
 #[test]
+fn streamed_command_reports_start_before_spawn_and_uses_the_caller_thread() {
+    let caller_thread = thread::current().id();
+    let spawn_reporter = RecordingReporter::default();
+    let missing_bin = "/definitely/missing/hpc-compose-stream-test";
+    let spawn_error = run_streamed_command(
+        Command::new(missing_bin),
+        missing_bin,
+        "spawn missing streamed tool",
+        &StreamCtx {
+            reporter: &spawn_reporter,
+            service: "spawn-service",
+            phase: "spawn-phase",
+            target: None,
+        },
+    )
+    .expect_err("missing command must fail to spawn");
+    assert!(spawn_error.to_string().contains("failed to execute"));
+    assert_eq!(
+        spawn_reporter.events(),
+        vec![RecordedPrepareEvent::Started {
+            service: "spawn-service".to_string(),
+            phase: "spawn-phase".to_string(),
+            thread: caller_thread,
+        }],
+        "the non-Send reporter is called synchronously before spawn"
+    );
+
+    let reporter = RecordingReporter::default();
+    run_streamed_command(
+        stream_test_command(
+            "printf 'stdout padded \\t  \\n'; printf '\\n'; printf 'stdout final'; \
+             printf 'stderr padded \\t  \\n' >&2; printf '\\n' >&2; printf 'stderr final' >&2",
+        ),
+        "/bin/sh",
+        "record output",
+        &StreamCtx {
+            reporter: &reporter,
+            service: "svc",
+            phase: "streaming",
+            target: None,
+        },
+    )
+    .expect("streaming command");
+
+    let events = reporter.events();
+    assert_eq!(
+        events.first(),
+        Some(&RecordedPrepareEvent::Started {
+            service: "svc".to_string(),
+            phase: "streaming".to_string(),
+            thread: caller_thread,
+        })
+    );
+    assert!(events.iter().all(|event| {
+        let event_thread = match event {
+            RecordedPrepareEvent::Started { thread, .. }
+            | RecordedPrepareEvent::Output { thread, .. }
+            | RecordedPrepareEvent::Bytes { thread, .. } => thread,
+        };
+        *event_thread == caller_thread
+    }));
+    let mut output = events
+        .iter()
+        .filter_map(|event| match event {
+            RecordedPrepareEvent::Output { line, .. } => Some(line.clone()),
+            RecordedPrepareEvent::Started { .. } | RecordedPrepareEvent::Bytes { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    output.sort();
+    assert_eq!(
+        output,
+        vec![
+            "stderr final".to_string(),
+            "stderr padded".to_string(),
+            "stdout final".to_string(),
+            "stdout padded".to_string(),
+        ],
+        "stdout and stderr are forwarded, trailing whitespace is trimmed, and blank lines are skipped"
+    );
+
+    let event_count = events.len();
+    run_streamed_command(
+        stream_test_command("printf 'quiet stdout\\n'; printf 'quiet stderr\\n' >&2"),
+        "/bin/sh",
+        "quiet output",
+        &StreamCtx::quiet(&reporter, "svc"),
+    )
+    .expect("quiet command");
+    assert_eq!(reporter.events().len(), event_count);
+}
+
+#[test]
+fn streamed_command_failure_boundary_is_stderr_only_and_fully_drained() {
+    let stream = StreamCtx::quiet(&NoopPrepareReporter, "test");
+    let error = run_streamed_command(
+        stream_test_command(
+            "printf 'STDOUT-MUST-NOT-APPEAR\\n'; printf 'first stderr\\n' >&2; \
+             (sleep 0.05; printf 'final stderr\\n' >&2) & exit 23",
+        ),
+        "/bin/sh",
+        "exercise streamed failure",
+        &stream,
+    )
+    .expect_err("command must fail");
+    assert_eq!(
+        error.to_string(),
+        "failed to exercise streamed failure: first stderr\nfinal stderr"
+    );
+    assert!(!error.to_string().contains("STDOUT-MUST-NOT-APPEAR"));
+
+    run_streamed_command(
+        stream_test_command("printf 'successful stderr is diagnostic-only\\n' >&2"),
+        "/bin/sh",
+        "successful stderr",
+        &stream,
+    )
+    .expect("stderr does not make a successful command fail");
+
+    let empty = run_streamed_command(
+        stream_test_command("exit 17"),
+        "/bin/sh",
+        "empty stderr",
+        &stream,
+    )
+    .expect_err("empty stderr failure");
+    assert_eq!(empty.to_string(), "failed to empty stderr: ");
+
+    let nonempty = run_streamed_command(
+        stream_test_command("printf '  first bytes  \\nlast bytes\\t\\n' >&2; exit 18"),
+        "/bin/sh",
+        "nonempty stderr",
+        &stream,
+    )
+    .expect_err("nonempty stderr failure");
+    assert_eq!(
+        nonempty.to_string(),
+        "failed to nonempty stderr: first bytes  \nlast bytes"
+    );
+}
+
+#[test]
 fn newline_free_prepare_output_is_split_into_byte_bounded_chunks() {
     use std::io::Cursor;
 
@@ -663,8 +927,6 @@ fn byte_bounded_output_preserves_utf8_split_at_the_chunk_boundary() {
 
 #[test]
 fn byte_bounded_output_preserves_crlf_at_the_chunk_boundary() {
-    use std::io::Cursor;
-
     const OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
     let mut input = vec![b'x'; OUTPUT_CHUNK_BYTES - 1];
     input.extend_from_slice(b"\r\nnext\r\n");
@@ -676,6 +938,159 @@ fn byte_bounded_output_preserves_crlf_at_the_chunk_boundary() {
     assert_eq!(
         chunks,
         vec!["x".repeat(OUTPUT_CHUNK_BYTES - 1), "next".to_string()]
+    );
+}
+
+#[test]
+fn lossy_decoder_preserves_empty_invalid_and_exact_boundary_contracts() {
+    fn decode(input: &[u8]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for_each_line_lossy(Cursor::new(input), |line| lines.push(line));
+        lines
+    }
+
+    assert!(decode(&[]).is_empty());
+    assert_eq!(decode(b"\n"), vec![String::new()]);
+    assert_eq!(decode(b"invalid-\xff-byte\n"), vec!["invalid-�-byte"]);
+    assert_eq!(decode(b"final unterminated"), vec!["final unterminated"]);
+    assert_eq!(
+        decode(b"trailing carriage return\r"),
+        vec!["trailing carriage return"]
+    );
+
+    const OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
+    let exact_cap = vec![b'x'; OUTPUT_CHUNK_BYTES];
+    let chunks = decode(&exact_cap);
+    assert_eq!(chunks, vec!["x".repeat(OUTPUT_CHUNK_BYTES)]);
+}
+
+#[test]
+fn failure_markers_are_detected_when_phrases_cross_observe_boundaries() {
+    let mut stale_phrase = StreamFailureSignals::default();
+    stale_phrase.observe("prefix STALE FI");
+    stale_phrase.observe("LE HANDLE suffix");
+    assert!(stale_phrase.is_stale_handle());
+
+    let mut read_because = StreamFailureSignals::default();
+    read_because.observe("read fai");
+    read_because.observe("led bec");
+    read_because.observe("ause the filesystem changed");
+    assert!(read_because.is_stale_handle());
+
+    let mut squashfs_read = StreamFailureSignals::default();
+    squashfs_read.observe("squash");
+    squashfs_read.observe("fs writer: read fai");
+    squashfs_read.observe("led");
+    assert!(squashfs_read.is_stale_handle());
+
+    let mut missing_manifest = StreamFailureSignals::default();
+    missing_manifest.observe("mani");
+    missing_manifest.observe("fest un");
+    missing_manifest.observe("known");
+    assert!(missing_manifest.is_missing_image());
+
+    let mut missing_tag = StreamFailureSignals::default();
+    missing_tag.observe("mani");
+    missing_tag.observe("fest was not fo");
+    missing_tag.observe("und");
+    assert!(missing_tag.is_missing_image());
+
+    let mut unauthorized = StreamFailureSignals::default();
+    unauthorized.observe("status 401 unau");
+    unauthorized.observe("thorized");
+    assert!(unauthorized.is_missing_image());
+
+    let mut denied = StreamFailureSignals::default();
+    denied.observe("access to the res");
+    denied.observe("ource is denied");
+    assert!(denied.is_missing_image());
+}
+
+#[test]
+fn streamed_command_reads_verbose_env_per_call_and_preserves_failure_mode() {
+    let _guard = env_lock().lock().expect("env lock");
+    let previous_verbose = env::var_os(PREPARE_VERBOSE_ENV);
+    let reporter = RecordingReporter::default();
+    let stream = |phase: &'static str| StreamCtx {
+        reporter: &reporter,
+        service: "svc",
+        phase,
+        target: None,
+    };
+
+    unsafe { env::remove_var(PREPARE_VERBOSE_ENV) };
+    let captured_first = run_streamed_command(
+        stream_test_command("printf 'captured first\\n'"),
+        "/bin/sh",
+        "captured first",
+        &stream("captured-first"),
+    );
+    unsafe { env::set_var(PREPARE_VERBOSE_ENV, "1") };
+    let verbose_success = run_streamed_command(
+        stream_test_command("printf 'verbose stdout\\n'; printf 'verbose stderr\\n' >&2"),
+        "/bin/sh",
+        "verbose success",
+        &stream("verbose-success"),
+    );
+    unsafe { env::remove_var(PREPARE_VERBOSE_ENV) };
+    let captured_second = run_streamed_command(
+        stream_test_command("printf 'captured second\\n'"),
+        "/bin/sh",
+        "captured second",
+        &stream("captured-second"),
+    );
+    let captured_failure = run_streamed_command(
+        stream_test_command("printf 'CAPTURED-TAIL\\n' >&2; exit 19"),
+        "/bin/sh",
+        "captured failure",
+        &stream("captured-failure"),
+    );
+    unsafe { env::set_var(PREPARE_VERBOSE_ENV, "true") };
+    let verbose_failure = run_streamed_command(
+        stream_test_command("printf 'VERBOSE-TAIL\\n' >&2; exit 20"),
+        "/bin/sh",
+        "verbose failure",
+        &stream("verbose-failure"),
+    );
+
+    match previous_verbose {
+        Some(value) => unsafe { env::set_var(PREPARE_VERBOSE_ENV, value) },
+        None => unsafe { env::remove_var(PREPARE_VERBOSE_ENV) },
+    }
+
+    captured_first.expect("first captured call");
+    verbose_success.expect("verbose success");
+    captured_second.expect("second captured call");
+    assert_eq!(
+        captured_failure.expect_err("captured failure").to_string(),
+        "failed to captured failure: CAPTURED-TAIL"
+    );
+    let verbose_error = verbose_failure.expect_err("verbose failure").to_string();
+    assert_eq!(
+        verbose_error,
+        "failed to verbose failure (see the streamed output above)"
+    );
+    assert!(!verbose_error.contains("VERBOSE-TAIL"));
+
+    let events = reporter.events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, RecordedPrepareEvent::Started { .. }))
+            .count(),
+        5
+    );
+    let mut output = events
+        .iter()
+        .filter_map(|event| match event {
+            RecordedPrepareEvent::Output { line, .. } => Some(line.as_str()),
+            RecordedPrepareEvent::Started { .. } | RecordedPrepareEvent::Bytes { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    output.sort_unstable();
+    assert_eq!(
+        output,
+        vec!["CAPTURED-TAIL", "captured first", "captured second"]
     );
 }
 
@@ -803,6 +1218,107 @@ fn identical_remote_images_share_base_cache_path() {
 }
 
 #[test]
+fn force_rebuild_refreshes_one_shared_remote_base_per_backend() {
+    for backend in [RuntimeBackend::Pyxis, RuntimeBackend::Apptainer] {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let root = tmpdir.path().join(backend.as_str());
+        fs::create_dir_all(&root).expect("backend root");
+        let log = root.join("runtime.log");
+        let runtime_bin = match backend {
+            RuntimeBackend::Pyxis => write_fake_enroot(&root, &log),
+            RuntimeBackend::Apptainer => write_fake_sif_runtime(&root, &log),
+            RuntimeBackend::Singularity | RuntimeBackend::Host => unreachable!("test backend"),
+        };
+        let compose = root.join("compose.yaml");
+        fs::write(&compose, "services: {}\n").expect("compose");
+        let remote_service = |name: &str| PlannedService {
+            name: name.to_string(),
+            image: ImageSource::Remote("docker://example.com/shared:1".into()),
+            execution: ExecutionSpec::ImageDefault,
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            assertions: None,
+            failure_policy: ServiceFailurePolicy::default(),
+            placement: ServicePlacement::default(),
+            slurm: ServiceSlurmConfig::default(),
+            prepare: None,
+        };
+        let runtime_plan = build_runtime_plan(&Plan {
+            name: "demo".into(),
+            project_dir: root.clone(),
+            spec_path: compose,
+            cache_dir: root.join("cache"),
+            runtime: RuntimeConfig {
+                backend,
+                ..RuntimeConfig::default()
+            },
+            slurm: SlurmConfig::default(),
+            ordered_services: vec![remote_service("svc-a"), remote_service("svc-b")],
+        });
+        assert_eq!(
+            runtime_plan.ordered_services[0].runtime_image,
+            runtime_plan.ordered_services[1].runtime_image,
+            "the fixture must exercise one shared base artifact"
+        );
+
+        let mut options = PrepareOptions {
+            force_rebuild: true,
+            ..PrepareOptions::default()
+        };
+        match backend {
+            RuntimeBackend::Pyxis => options.enroot_bin = runtime_bin.display().to_string(),
+            RuntimeBackend::Apptainer => options.apptainer_bin = runtime_bin.display().to_string(),
+            RuntimeBackend::Singularity | RuntimeBackend::Host => unreachable!("test backend"),
+        }
+        let summary = prepare_runtime_plan(&runtime_plan, &options).expect("shared base prepare");
+
+        let runtime_log = fs::read_to_string(&log).expect("runtime log");
+        let build_prefix = match backend {
+            RuntimeBackend::Pyxis => "import ",
+            RuntimeBackend::Apptainer => "build --force ",
+            RuntimeBackend::Singularity | RuntimeBackend::Host => unreachable!("test backend"),
+        };
+        assert_eq!(
+            runtime_log
+                .lines()
+                .filter(|line| line.starts_with(build_prefix))
+                .count(),
+            1,
+            "CLI force must refresh a shared base only once for backend {backend:?}"
+        );
+
+        let expected_note = match backend {
+            RuntimeBackend::Pyxis => "base cache artifact is used directly at runtime",
+            RuntimeBackend::Apptainer => "base SIF cache artifact is used directly at runtime",
+            RuntimeBackend::Singularity | RuntimeBackend::Host => unreachable!("test backend"),
+        };
+        for (service, expected_action) in summary
+            .services
+            .iter()
+            .zip([ArtifactAction::Built, ArtifactAction::Reused])
+        {
+            let base = service.base_image.as_ref().expect("remote base status");
+            assert_eq!(base.action, expected_action);
+            assert_eq!(base.note, None);
+            assert_eq!(service.runtime_image.action, expected_action);
+            assert_eq!(service.runtime_image.note.as_deref(), Some(expected_note));
+            assert_eq!(service.runtime_image.path, base.path);
+        }
+
+        let manifest = crate::cache::read_manifest(&runtime_plan.ordered_services[0].runtime_image)
+            .expect("shared base manifest");
+        assert_eq!(manifest.kind, crate::cache::CacheEntryKind::Base);
+        assert_eq!(
+            manifest.service_names,
+            vec!["svc-a".to_string(), "svc-b".to_string()]
+        );
+    }
+}
+
+#[test]
 fn sif_backends_use_sif_cache_paths_for_remote_images() {
     let service = RuntimeService {
         name: "app".into(),
@@ -912,6 +1428,138 @@ fn force_rebuild_option_rebuilds_prepared_images() {
     assert_eq!(
         summary.services[0].runtime_image.note.as_deref(),
         Some("rebuilt because --force/--force-rebuild was requested")
+    );
+}
+
+#[test]
+fn pyxis_prepared_action_and_note_contract_covers_reuse_force_and_mounts() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let normal_root = tmpdir.path().join("normal");
+    fs::create_dir_all(&normal_root).expect("normal root");
+    let normal_log = normal_root.join("enroot.log");
+    let normal_fake = write_fake_enroot(&normal_root, &normal_log);
+    let normal_plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: normal_root.join("cache"),
+        runtime: RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![fake_service(&normal_root)],
+    };
+    let normal_options = PrepareOptions {
+        enroot_bin: normal_fake.display().to_string(),
+        ..PrepareOptions::default()
+    };
+
+    prepare_runtime_plan(&normal_plan, &normal_options).expect("initial Pyxis prepare");
+    let reused = prepare_runtime_plan(&normal_plan, &normal_options).expect("cached Pyxis prepare");
+    assert_runtime_artifact_status(&reused, ArtifactAction::Reused, None);
+
+    let forced = prepare_runtime_plan(
+        &normal_plan,
+        &PrepareOptions {
+            force_rebuild: true,
+            ..normal_options.clone()
+        },
+    )
+    .expect("forced Pyxis prepare");
+    assert_runtime_artifact_status(
+        &forced,
+        ArtifactAction::Built,
+        Some("rebuilt because --force/--force-rebuild was requested"),
+    );
+
+    let mount_root = tmpdir.path().join("mounts");
+    fs::create_dir_all(&mount_root).expect("mount root");
+    let mount_log = mount_root.join("enroot.log");
+    let mount_fake = write_fake_enroot(&mount_root, &mount_log);
+    let mut mount_service = fake_service(&mount_root);
+    let prepare = mount_service.prepare.as_mut().expect("prepare");
+    prepare.mounts = vec!["/host:/mnt".into()];
+    prepare.force_rebuild = true;
+    let mount_plan = RuntimePlan {
+        name: "demo".into(),
+        cache_dir: mount_root.join("cache"),
+        runtime: RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![mount_service],
+    };
+    let mount_options = PrepareOptions {
+        enroot_bin: mount_fake.display().to_string(),
+        ..PrepareOptions::default()
+    };
+    prepare_runtime_plan(&mount_plan, &mount_options).expect("initial mounted Pyxis prepare");
+    let mount_forced =
+        prepare_runtime_plan(&mount_plan, &mount_options).expect("cached mounted Pyxis prepare");
+    assert_runtime_artifact_status(
+        &mount_forced,
+        ArtifactAction::Built,
+        Some("rebuilt because prepare.mounts are present"),
+    );
+    let both_forced = prepare_runtime_plan(
+        &mount_plan,
+        &PrepareOptions {
+            force_rebuild: true,
+            ..mount_options
+        },
+    )
+    .expect("CLI-forced mounted Pyxis prepare");
+    assert_runtime_artifact_status(
+        &both_forced,
+        ArtifactAction::Built,
+        Some("rebuilt because --force/--force-rebuild was requested"),
+    );
+}
+
+#[test]
+fn sif_prepared_action_and_note_contract_covers_reuse_force_and_mounts() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let log = tmpdir.path().join("sif-runtime.log");
+    let fake = write_fake_sif_runtime(tmpdir.path(), &log);
+    let normal_plan = fake_sif_prepared_plan(&tmpdir.path().join("normal"), false);
+    let normal_options = PrepareOptions {
+        apptainer_bin: fake.display().to_string(),
+        ..PrepareOptions::default()
+    };
+
+    prepare_runtime_plan(&normal_plan, &normal_options).expect("initial SIF prepare");
+    let reused = prepare_runtime_plan(&normal_plan, &normal_options).expect("cached SIF prepare");
+    assert_runtime_artifact_status(&reused, ArtifactAction::Reused, None);
+
+    let forced = prepare_runtime_plan(
+        &normal_plan,
+        &PrepareOptions {
+            force_rebuild: true,
+            ..normal_options.clone()
+        },
+    )
+    .expect("forced SIF prepare");
+    assert_runtime_artifact_status(
+        &forced,
+        ArtifactAction::Built,
+        Some("rebuilt because --force/--force-rebuild was requested"),
+    );
+
+    let mount_plan = fake_sif_prepared_plan(&tmpdir.path().join("mounts"), true);
+    prepare_runtime_plan(&mount_plan, &normal_options).expect("initial mounted SIF prepare");
+    let mount_forced =
+        prepare_runtime_plan(&mount_plan, &normal_options).expect("cached mounted SIF prepare");
+    assert_runtime_artifact_status(
+        &mount_forced,
+        ArtifactAction::Built,
+        Some("rebuilt because prepare.mounts are present"),
+    );
+    let both_forced = prepare_runtime_plan(
+        &mount_plan,
+        &PrepareOptions {
+            force_rebuild: true,
+            ..normal_options
+        },
+    )
+    .expect("CLI-forced mounted SIF prepare");
+    assert_runtime_artifact_status(
+        &both_forced,
+        ArtifactAction::Built,
+        Some("rebuilt because --force/--force-rebuild was requested"),
     );
 }
 
@@ -1729,16 +2377,64 @@ fn resolve_enroot_temp_dir_applies_precedence_and_default() {
 }
 
 #[test]
-fn gpu_flag_enabled_accepts_truthy_values_and_defaults_off() {
-    // Default (unset) keeps the NVIDIA hook disabled during prepare.
-    assert!(!gpu_flag_enabled(None));
-    // Accepted truthy spellings, case- and whitespace-insensitive.
-    for value in ["1", "true", "TRUE", "yes", "On", "  true  "] {
-        assert!(gpu_flag_enabled(Some(value)), "{value:?} should enable GPU");
+fn prepare_truthy_flags_preserve_case_whitespace_and_false_value_parity() {
+    let _guard = env_lock().lock().expect("env lock");
+    let previous_gpu = env::var_os(PREPARE_GPU_ENV);
+    let previous_verbose = env::var_os(PREPARE_VERBOSE_ENV);
+
+    unsafe {
+        env::remove_var(PREPARE_GPU_ENV);
+        env::remove_var(PREPARE_VERBOSE_ENV);
     }
-    // Anything else stays off.
-    for value in ["0", "false", "no", "", "  ", "maybe"] {
-        assert!(!gpu_flag_enabled(Some(value)), "{value:?} should stay off");
+    let defaults = (
+        gpu_flag_enabled(None),
+        prepare_gpu_enabled(),
+        prepare_verbose_enabled(),
+    );
+
+    let mut observations = Vec::new();
+    for (value, expected) in [
+        ("1", true),
+        ("true", true),
+        ("TRUE", true),
+        ("yes", true),
+        ("On", true),
+        ("  true  ", true),
+        ("0", false),
+        ("false", false),
+        (" FALSE ", false),
+        ("no", false),
+        ("", false),
+        ("  ", false),
+        ("maybe", false),
+    ] {
+        unsafe {
+            env::set_var(PREPARE_GPU_ENV, value);
+            env::set_var(PREPARE_VERBOSE_ENV, value);
+        }
+        observations.push((
+            value,
+            expected,
+            gpu_flag_enabled(Some(value)),
+            prepare_gpu_enabled(),
+            prepare_verbose_enabled(),
+        ));
+    }
+
+    match previous_gpu {
+        Some(value) => unsafe { env::set_var(PREPARE_GPU_ENV, value) },
+        None => unsafe { env::remove_var(PREPARE_GPU_ENV) },
+    }
+    match previous_verbose {
+        Some(value) => unsafe { env::set_var(PREPARE_VERBOSE_ENV, value) },
+        None => unsafe { env::remove_var(PREPARE_VERBOSE_ENV) },
+    }
+
+    assert_eq!(defaults, (false, false, false));
+    for (value, expected, pure, gpu_env, verbose_env) in observations {
+        assert_eq!(pure, expected, "pure {value:?}");
+        assert_eq!(gpu_env, expected, "gpu env {value:?}");
+        assert_eq!(verbose_env, expected, "verbose env {value:?}");
     }
 }
 

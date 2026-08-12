@@ -157,6 +157,84 @@ fn embedded_local_srun_shim(script: &str) -> &str {
         .0
 }
 
+fn shell_function_definitions<'a>(script: &'a str, name: &str) -> Vec<&'a str> {
+    let header = format!("{name}() {{\n");
+    script
+        .match_indices(&header)
+        .map(|(start, _)| {
+            let function = &script[start..];
+            let end = function
+                .find("\n}\n\n")
+                .expect("rendered shell function should end with a trailing blank line")
+                + "\n}\n\n".len();
+            &function[..end]
+        })
+        .collect()
+}
+
+const SCRATCH_HOST_PATH_FOR_FUNCTION: &str = concat!(
+    "scratch_host_path_for() {\n",
+    "  local path=$1\n",
+    "  if [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\" ]]; then\n",
+    "    printf '%s' \"$SCRATCH_HOST_PATH\"\n",
+    "  elif [[ -n \"${SCRATCH_CONTAINER_PATH:-}\" && -n \"${SCRATCH_HOST_PATH:-}\" && \"$path\" == \"$SCRATCH_CONTAINER_PATH\"/* ]]; then\n",
+    "    printf '%s/%s' \"$SCRATCH_HOST_PATH\" \"${path#\"$SCRATCH_CONTAINER_PATH\"/}\"\n",
+    "  else\n",
+    "    printf '%s' \"$path\"\n",
+    "  fi\n",
+    "}\n\n",
+);
+
+const STAGE_COPY_PATH_FUNCTION: &str = concat!(
+    "stage_copy_path() {\n",
+    "  local from=$1\n",
+    "  local to=$2\n",
+    "  local mode=$3\n",
+    "  mkdir -p \"$(dirname \"$to\")\"\n",
+    "  if [[ \"$mode\" == \"rsync\" ]]; then\n",
+    "    if command -v rsync >/dev/null 2>&1; then\n",
+    "      rsync -a \"$from\" \"$to\"\n",
+    "    else\n",
+    "      cp -R \"$from\" \"$to\"\n",
+    "    fi\n",
+    "  else\n",
+    "    cp -R \"$from\" \"$to\"\n",
+    "  fi\n",
+    "}\n\n",
+);
+
+const STAGE_IN_PATHS_ON_CURRENT_NODE_FUNCTION: &str = concat!(
+    "stage_in_paths_on_current_node() {\n",
+    "  local i\n",
+    "  for i in \"${!STAGE_IN_FROM[@]}\"; do\n",
+    "    local from=${STAGE_IN_FROM[i]}\n",
+    "    local to\n",
+    "    to=$(scratch_host_path_for \"${STAGE_IN_TO[i]}\")\n",
+    "    echo \"Staging in $from -> $to\"\n",
+    "    stage_copy_path \"$from\" \"$to\" \"${STAGE_IN_MODES[i]}\"\n",
+    "  done\n",
+    "}\n\n",
+);
+
+const STAGE_OUT_PATHS_ON_CURRENT_NODE_FUNCTION: &str = concat!(
+    "stage_out_paths_on_current_node() {\n",
+    "  local exit_code=${1:-0}\n",
+    "  local outcome=success\n",
+    "  (( exit_code != 0 )) && outcome=failure\n",
+    "  local i\n",
+    "  for i in \"${!STAGE_OUT_FROM[@]}\"; do\n",
+    "    local when=${STAGE_OUT_WHEN[i]}\n",
+    "    if [[ \"$when\" == \"on_success\" && \"$outcome\" != \"success\" ]]; then continue; fi\n",
+    "    if [[ \"$when\" == \"on_failure\" && \"$outcome\" != \"failure\" ]]; then continue; fi\n",
+    "    local from\n",
+    "    from=$(scratch_host_path_for \"${STAGE_OUT_FROM[i]}\")\n",
+    "    local to=${STAGE_OUT_TO[i]}\n",
+    "    echo \"Staging out $from -> $to\"\n",
+    "    stage_copy_path \"$from\" \"$to\" \"${STAGE_OUT_MODES[i]}\"\n",
+    "  done\n",
+    "}\n\n",
+);
+
 fn write_executable(path: &std::path::Path, body: &str) {
     fs::write(path, body).expect("write script");
     let mut perms = fs::metadata(path).expect("meta").permissions();
@@ -919,7 +997,7 @@ fn hf_stage_in_resolves_scratch_destination_before_copying() {
             }),
             stage_in: vec![StageInConfig {
                 from: None,
-                to: "/scratch/models/llama".into(),
+                to: "/scratch/models/user's llama".into(),
                 mode: StageMode::Rsync,
                 hf: Some(crate::spec::HfStageSource {
                     repo: "meta-llama/Llama-3.1-8B".into(),
@@ -935,7 +1013,7 @@ fn hf_stage_in_resolves_scratch_destination_before_copying() {
     let script = render_script(&plan).expect("script");
 
     assert!(
-        script.contains("hf_stage_to=$(scratch_host_path_for '/scratch/models/llama')"),
+        script.contains("hf_stage_to=$(scratch_host_path_for '/scratch/models/user'\\''s llama')"),
         "hf stage-in destination should use scratch host mapping; got:\n{script}"
     );
     assert!(
@@ -943,7 +1021,9 @@ fn hf_stage_in_resolves_scratch_destination_before_copying() {
         "hf stage-in should copy into the resolved destination; got:\n{script}"
     );
     assert!(
-        !script.contains("stage_copy_path \"$HF_STAGE_TARGET\"/. '/scratch/models/llama' copy"),
+        !script.contains(
+            "stage_copy_path \"$HF_STAGE_TARGET\"/. '/scratch/models/user'\\''s llama' copy"
+        ),
         "hf stage-in should not copy to the literal scratch container path"
     );
 }
@@ -1042,11 +1122,7 @@ fn render_exposes_job_dir_pointing_at_the_real_path_per_backend() {
 
 #[test]
 fn render_service_scratch_disabled_resolves_to_runtime_disabled_flag() {
-    let mut service = runtime_service();
-    service.slurm.scratch = Some(ServiceScratchConfig {
-        enabled: Some(false),
-    });
-    let plan = RuntimePlan {
+    let mut plan = RuntimePlan {
         name: "scratch-disabled".into(),
         cache_dir: PathBuf::from("/shared/cache"),
         runtime: crate::spec::RuntimeConfig::default(),
@@ -1059,12 +1135,25 @@ fn render_service_scratch_disabled_resolves_to_runtime_disabled_flag() {
             }),
             ..SlurmConfig::default()
         },
-        ordered_services: vec![service],
+        ordered_services: vec![runtime_service()],
     };
 
     let script = render_script(&plan).expect("script");
+    assert!(script.contains("  local scratch_enabled=1\n"));
+
+    plan.ordered_services[0].slurm.scratch = Some(ServiceScratchConfig {
+        enabled: Some(false),
+    });
+    let script = render_script(&plan).expect("script");
     assert!(script.contains("  local scratch_enabled=0\n"));
     assert!(script.contains("HPC_COMPOSE_SERVICE_SCRATCH_ENABLED=\"$scratch_enabled\""));
+
+    plan.ordered_services[0].slurm.scratch = Some(ServiceScratchConfig {
+        enabled: Some(true),
+    });
+    plan.slurm.scratch = None;
+    let script = render_script(&plan).expect("script");
+    assert!(script.contains("  local scratch_enabled=0\n"));
 }
 
 #[test]
@@ -1109,6 +1198,34 @@ fn render_node_local_multi_node_scratch_initializes_every_node() {
     assert!(script.contains(
             "srun --nodes=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks=\"$HPC_COMPOSE_NODE_COUNT\" --ntasks-per-node=1 bash \"$stage_out_node_script\" \"$exit_code\" \"$SCRATCH_CONTAINER_PATH\" \"$SCRATCH_HOST_PATH\""
         ));
+
+    for (name, expected, expected_count) in [
+        ("scratch_host_path_for", SCRATCH_HOST_PATH_FOR_FUNCTION, 3),
+        ("stage_copy_path", STAGE_COPY_PATH_FUNCTION, 3),
+        (
+            "stage_in_paths_on_current_node",
+            STAGE_IN_PATHS_ON_CURRENT_NODE_FUNCTION,
+            2,
+        ),
+        (
+            "stage_out_paths_on_current_node",
+            STAGE_OUT_PATHS_ON_CURRENT_NODE_FUNCTION,
+            2,
+        ),
+    ] {
+        let definitions = shell_function_definitions(&script, name);
+        assert_eq!(
+            definitions.len(),
+            expected_count,
+            "unexpected {name} definition count"
+        );
+        for (index, definition) in definitions.into_iter().enumerate() {
+            assert_eq!(
+                definition, expected,
+                "{name} definition {index} changed exact shell bytes"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1647,6 +1764,109 @@ fn build_srun_command_and_string_helpers_cover_remaining_cases() {
     );
     assert_eq!(shell_quote(""), "''");
     assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
+}
+
+#[test]
+fn rendered_service_identity_and_runtime_state_labels_are_stable() {
+    let mut primary = runtime_service();
+    primary.name = "api.worker-1".into();
+    primary.failure_policy.mode = ServiceFailureMode::FailJob;
+    primary.placement.mode = ServicePlacementMode::PrimaryNode;
+
+    let mut distributed = runtime_service();
+    distributed.name = "distributed".into();
+    distributed.failure_policy.mode = ServiceFailureMode::Ignore;
+    distributed.placement = ServicePlacement {
+        mode: ServicePlacementMode::Distributed,
+        nodes: 2,
+        ntasks: Some(2),
+        ..ServicePlacement::default()
+    };
+
+    let mut partitioned = runtime_service();
+    partitioned.name = "partitioned".into();
+    partitioned.failure_policy.mode = ServiceFailureMode::RestartOnFailure;
+    partitioned.placement = ServicePlacement {
+        mode: ServicePlacementMode::Partitioned,
+        nodes: 1,
+        ntasks: Some(1),
+        node_indices: Some(vec![1]),
+        ..ServicePlacement::default()
+    };
+
+    let plan = RuntimePlan {
+        name: "identity-labels".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig {
+            nodes: Some(2),
+            ..SlurmConfig::default()
+        },
+        ordered_services: vec![primary, distributed, partitioned],
+    };
+    let script = render_script(&plan).expect("script");
+
+    assert_eq!(service_token("api.worker-1"), "api_x2e_worker_x2d_1");
+    assert_eq!(
+        service_step_name("api.worker-1"),
+        "hpc-compose:api_x2e_worker_x2d_1"
+    );
+    assert!(script.contains("launch_api_x2e_worker_x2d_1()"));
+    assert!(script.contains("'--job-name=hpc-compose:api_x2e_worker_x2d_1'"));
+
+    assert_eq!(
+        failure_policy_mode_label(ServiceFailureMode::FailJob),
+        "fail_job"
+    );
+    assert_eq!(
+        failure_policy_mode_label(ServiceFailureMode::Ignore),
+        "ignore"
+    );
+    assert_eq!(
+        failure_policy_mode_label(ServiceFailureMode::RestartOnFailure),
+        "restart_on_failure"
+    );
+    assert_eq!(
+        placement_mode_label(ServicePlacementMode::PrimaryNode),
+        "primary_node"
+    );
+    assert_eq!(
+        placement_mode_label(ServicePlacementMode::Distributed),
+        "distributed"
+    );
+    assert_eq!(
+        placement_mode_label(ServicePlacementMode::Partitioned),
+        "partitioned"
+    );
+
+    let registration_lines = script
+        .lines()
+        .filter(|line| line.trim_start().starts_with("register_service "))
+        .collect::<Vec<_>>();
+    assert_eq!(registration_lines.len(), 3);
+    let primary_registration = registration_lines
+        .iter()
+        .find(|line| line.contains("register_service 'api.worker-1' "))
+        .expect("punctuated service registration");
+    assert!(
+        primary_registration
+            .contains("\"$pid\" 'hpc-compose:api_x2e_worker_x2d_1' \"$logfile\" 'fail_job'")
+    );
+    assert!(primary_registration.contains("'primary_node' 1"));
+
+    let distributed_registration = registration_lines
+        .iter()
+        .find(|line| line.contains("register_service 'distributed' "))
+        .expect("distributed service registration");
+    assert!(distributed_registration.contains("\"$logfile\" 'ignore'"));
+    assert!(distributed_registration.contains("'distributed' 2"));
+
+    let partitioned_registration = registration_lines
+        .iter()
+        .find(|line| line.contains("register_service 'partitioned' "))
+        .expect("partitioned service registration");
+    assert!(partitioned_registration.contains("\"$logfile\" 'restart_on_failure'"));
+    assert!(partitioned_registration.contains("'partitioned' 1"));
 }
 
 #[test]
@@ -3086,6 +3306,50 @@ fn run_rendezvous_bash(tmpdir: &std::path::Path, driver: &str) -> std::process::
         .arg(&path)
         .output()
         .expect("run rendezvous script")
+}
+
+#[test]
+fn rendezvous_render_token_matches_bash_for_distinct_discovery_names() {
+    let names = vec!["model.server-v1".to_string(), "trainer".to_string()];
+    let env = rendezvous_environment_names(&names);
+    assert_eq!(env.len(), 24);
+    assert!(env.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(env.contains(&"HPC_COMPOSE_RDZV_MODEL_SERVER_V1_URL".to_string()));
+
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let output = run_rendezvous_bash(
+        tmpdir.path(),
+        "printf '%s' \"$(rdzv_env_token 'model.server-v1')\"\n",
+    );
+    assert!(
+        output.status.success(),
+        "token helper failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"MODEL_SERVER_V1");
+}
+
+#[test]
+fn render_rejects_colliding_rendezvous_environment_tokens() {
+    let mut plan = RuntimePlan {
+        name: "rendezvous-collision".into(),
+        cache_dir: PathBuf::from("/shared/cache"),
+        runtime: crate::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![runtime_service()],
+    };
+    plan.slurm.rendezvous = Some(crate::spec::RendezvousClientConfig {
+        discover: vec!["model.server-v1".into(), "model_server_v1".into()],
+        timeout_seconds: None,
+        require: None,
+    });
+
+    assert_eq!(
+        render_script(&plan)
+            .expect_err("colliding rendezvous environment names")
+            .to_string(),
+        "x-slurm.rendezvous.discover names 'model.server-v1' and 'model_server_v1' both map to environment token 'MODEL_SERVER_V1'; choose names that map to distinct environment tokens"
+    );
 }
 
 fn unix_now() -> u64 {

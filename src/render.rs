@@ -3,11 +3,14 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::cluster::ClusterProfile;
+use crate::domain::{
+    rendezvous_env_token, rendezvous_env_token_collision, service_step_name, service_token,
+};
 use crate::planner::{ExecutionSpec, ServicePlacementMode};
-use crate::runtime_plan::{RuntimePlan, RuntimeService};
+use crate::runtime_plan::{RuntimePlan, RuntimeService, service_allows_configured_scratch};
 use crate::spec::{
     ArtifactCollectPolicy, DependencyCondition, MetricsCollector, ReadinessSpec,
     RendezvousRegisterConfig, RuntimeBackend, RuntimeCacheCleanupPolicy, RuntimeGpuPolicy,
@@ -45,7 +48,7 @@ use software_env::{
     software_env_export_names,
 };
 use stage::{has_hf_stage_in, render_hf_stage_in, render_stage_helpers};
-use text::{bash_array_literal, flag, service_step_name, service_token, shell_quote};
+use text::{bash_array_literal, flag, shell_quote};
 
 const DIST_ENV_NAMES: &[&str] = &[
     "HPC_COMPOSE_DIST_MASTER_ADDR",
@@ -186,7 +189,7 @@ fn rendezvous_environment_names(names: &[String]) -> Vec<String> {
         "HPC_COMPOSE_RDZV_SERVICE".to_string(),
     ];
     for name in names {
-        let token = crate::rendezvous::env_token(name);
+        let token = rendezvous_env_token(name);
         env.extend([
             format!("HPC_COMPOSE_RDZV_{token}_NAME"),
             format!("HPC_COMPOSE_RDZV_{token}_URL"),
@@ -300,6 +303,17 @@ pub fn render_script_annotated(
     plan: &RuntimePlan,
     options: &RenderOptions,
 ) -> Result<(String, Vec<ProvenanceSpan>)> {
+    if let Some(rendezvous) = &plan.slurm.rendezvous
+        && let Some(collision) =
+            rendezvous_env_token_collision(rendezvous.discover.iter().map(String::as_str))
+    {
+        bail!(
+            "x-slurm.rendezvous.discover names '{}' and '{}' both map to environment token '{}'; choose names that map to distinct environment tokens",
+            collision.first_name,
+            collision.second_name,
+            collision.token
+        );
+    }
     let metrics_enabled = plan.slurm.metrics_enabled();
     let artifacts_enabled = plan.slurm.artifacts_enabled();
     let resume_enabled = plan.slurm.resume_dir().is_some();
@@ -1006,7 +1020,10 @@ pub fn render_script_annotated(
     out.push_str("build_pyxis_mounts() {\n");
     out.push_str("  local extra\n");
     out.push_str("  PYXIS_MOUNTS=()\n");
-    out.push_str("  append_unique_mount \"$JOB_TMP:/hpc-compose/job\"\n");
+    out.push_str(&format!(
+        "  append_unique_mount \"$JOB_TMP:{}\"\n",
+        tracked_paths::JOB_CONTAINER_DIR
+    ));
     out.push_str("  if [[ \"$RESUME_ENABLED\" == \"1\" ]]; then\n");
     out.push_str("    append_unique_mount \"$RESUME_HOST_PATH:$RESUME_CONTAINER_PATH\"\n");
     out.push_str("  fi\n");
@@ -1138,14 +1155,29 @@ pub fn render_script_annotated(
 
     out.push_str("update_latest_runtime_links() {\n");
     out.push_str("  [[ \"$RESUME_ENABLED\" == \"1\" ]] || return 0\n");
-    out.push_str("  replace_with_symlink \"$JOB_ROOT/allocation\" \"$ALLOCATION_DIR\"\n");
-    out.push_str("  replace_with_symlink \"$JOB_ROOT/logs\" \"$LOG_DIR\"\n");
-    out.push_str("  replace_with_symlink \"$JOB_ROOT/state.json\" \"$STATE_FILE\"\n");
+    out.push_str(&format!(
+        "  replace_with_symlink \"$JOB_ROOT/{}\" \"$ALLOCATION_DIR\"\n",
+        tracked_paths::ALLOCATION_DIR_NAME
+    ));
+    out.push_str(&format!(
+        "  replace_with_symlink \"$JOB_ROOT/{}\" \"$LOG_DIR\"\n",
+        tracked_paths::LOGS_DIR_NAME
+    ));
+    out.push_str(&format!(
+        "  replace_with_symlink \"$JOB_ROOT/{}\" \"$STATE_FILE\"\n",
+        tracked_paths::STATE_FILE_NAME
+    ));
     if metrics_enabled {
-        out.push_str("  replace_with_symlink \"$JOB_ROOT/metrics\" \"$METRICS_DIR\"\n");
+        out.push_str(&format!(
+            "  replace_with_symlink \"$JOB_ROOT/{}\" \"$METRICS_DIR\"\n",
+            tracked_paths::METRICS_DIR_NAME
+        ));
     }
     if artifacts_enabled {
-        out.push_str("  replace_with_symlink \"$JOB_ROOT/artifacts\" \"$ARTIFACTS_DIR\"\n");
+        out.push_str(&format!(
+            "  replace_with_symlink \"$JOB_ROOT/{}\" \"$ARTIFACTS_DIR\"\n",
+            tracked_paths::ARTIFACTS_DIR_NAME
+        ));
     }
     out.push_str("}\n\n");
 
@@ -1611,7 +1643,10 @@ pub fn render_script_annotated(
         out.push_str("  fi\n");
         out.push_str("  local artifact_pattern=${SERVICE_ASSERT_ARTIFACT_PATTERNS[index]:-}\n");
         out.push_str("  if [[ -n \"$artifact_pattern\" ]]; then\n");
-        out.push_str("    local host_pattern=\"$JOB_TMP${artifact_pattern#/hpc-compose/job}\"\n");
+        out.push_str(&format!(
+            "    local host_pattern=\"$JOB_TMP${{artifact_pattern#{}}}\"\n",
+            tracked_paths::JOB_CONTAINER_DIR
+        ));
         out.push_str("    local shopt_state\n");
         out.push_str("    shopt_state=$(shopt -p nullglob globstar dotglob)\n");
         out.push_str("    shopt -s nullglob globstar dotglob\n");
@@ -2702,7 +2737,7 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
     }
     out.push_str(&format!(
         "  local scratch_enabled={}\n",
-        if context.scratch_configured && service_scratch_enabled(service) {
+        if context.scratch_configured && service_allows_configured_scratch(service) {
             "1"
         } else {
             "0"
@@ -2840,15 +2875,18 @@ fn render_service(out: &mut String, service: &RuntimeService, context: &RenderSe
         "  launch_env+=(\"HPC_COMPOSE_SERVICE_NODELIST_FILE=$service_nodelist_container\")\n",
     );
     // Portable per-job scratch dir. In container backends $JOB_TMP is bind-mounted
-    // at /hpc-compose/job, so that is the path services see; the host backend has
-    // no mount, so point services at $JOB_TMP directly. Writing under
-    // $HPC_COMPOSE_JOB_DIR keeps the same spec working on both backends and lands
-    // files where artifact collection looks (artifacts declared as
-    // /hpc-compose/job/** remap to $JOB_TMP/** on the host).
+    // at the reserved job container root, so that is the path services see; the
+    // host backend has no mount, so point services at $JOB_TMP directly. Writing
+    // under $HPC_COMPOSE_JOB_DIR keeps the same spec working on both backends and
+    // lands files where artifact collection looks (paths beneath the reserved job
+    // container root remap to $JOB_TMP on the host).
     if context.runtime.backend == RuntimeBackend::Host {
         out.push_str("  launch_env+=(\"HPC_COMPOSE_JOB_DIR=$JOB_TMP\")\n");
     } else {
-        out.push_str("  launch_env+=(\"HPC_COMPOSE_JOB_DIR=/hpc-compose/job\")\n");
+        out.push_str(&format!(
+            "  launch_env+=(\"HPC_COMPOSE_JOB_DIR={}\")\n",
+            tracked_paths::JOB_CONTAINER_DIR
+        ));
     }
     if let Some(parallelism) = &service.slurm.parallelism {
         // Descriptive tensor/pipeline sizes. Emitted for single-node services
@@ -3100,15 +3138,6 @@ fn render_runtime_command(
             out.push_str("    runtime_cmd+=(\"${service_cmd[@]}\")\n");
         }
     }
-}
-
-fn service_scratch_enabled(service: &RuntimeService) -> bool {
-    service
-        .slurm
-        .scratch
-        .as_ref()
-        .and_then(|scratch| scratch.enabled)
-        .unwrap_or(true)
 }
 
 fn allocation_requests_gpu(slurm: &crate::spec::SlurmConfig) -> bool {
