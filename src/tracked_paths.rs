@@ -35,7 +35,6 @@ pub(crate) const NODELIST_FILE_NAME: &str = "nodes.txt";
 /// expanded nodelist uses [`NODELIST_FILE_NAME`] (`nodes.txt`). Keep the two
 /// names distinct so active-allocation `HPC_COMPOSE_NODELIST_FILE` remains
 /// byte-for-byte compatible with existing workflows.
-#[allow(dead_code)]
 pub(crate) const LEGACY_ACTIVE_ALLOCATION_NODELIST_FILE_NAME: &str = "nodelist";
 pub(crate) const RESUME_METADATA_DIR_NAME: &str = "_hpc-compose";
 pub(crate) const SERVICE_EXITS_DIR_NAME: &str = "service-exits";

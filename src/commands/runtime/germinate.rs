@@ -18,7 +18,6 @@ use hpc_compose::runtime_plan::RuntimePlan;
 use hpc_compose::spec::{
     MetricsCollector, MetricsConfig, gres_requests_gpu, parse_slurm_time_limit,
 };
-use serde::Serialize;
 
 use super::{
     PrepareFlags, PreparedSlurmSubmission, collect_submit_provenance,
@@ -27,20 +26,8 @@ use super::{
 };
 use crate::commands::load;
 use crate::output;
+pub(crate) use crate::output::runtime::GerminateOutput;
 use crate::progress::{PrepareProgress, ProgressReporter};
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct GerminateOutput<'a> {
-    pub(crate) schema_version: u32,
-    compose_file: &'a Path,
-    script_path: &'a Path,
-    cache_dir: &'a Path,
-    dry_run: bool,
-    job_id: Option<&'a str>,
-    tracked_metadata_path: Option<PathBuf>,
-    yaml_patch: Option<String>,
-    report: Option<&'a hpc_compose::job::RightsizeReport>,
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn germinate(
@@ -89,7 +76,7 @@ pub(crate) fn germinate(
             &context.resource_profiles,
         )?;
     let effective_config_yaml =
-        output::effective_config_yaml(&effective_config, &context.secret_values())?;
+        crate::job::effective_config_snapshot_yaml(&effective_config, &context.secret_values())?;
     let original_plan =
         load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -499,4 +486,41 @@ fn recommendation_yaml_patch(report: &hpc_compose::job::RightsizeReport) -> Stri
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::GerminateOutput;
+
+    #[test]
+    fn germinate_output_preserves_exact_pretty_json_bytes() {
+        let output = GerminateOutput {
+            schema_version: 1,
+            compose_file: Path::new("compose.yaml"),
+            script_path: Path::new("scripts/canary.sbatch"),
+            cache_dir: Path::new("cache"),
+            dry_run: true,
+            job_id: None,
+            tracked_metadata_path: None,
+            yaml_patch: None,
+            report: None,
+        };
+
+        let actual = crate::output::to_pretty_json(&output).expect("serialize germinate fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "compose_file": "compose.yaml",
+  "script_path": "scripts/canary.sbatch",
+  "cache_dir": "cache",
+  "dry_run": true,
+  "job_id": null,
+  "tracked_metadata_path": null,
+  "yaml_patch": null,
+  "report": null
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+    }
 }

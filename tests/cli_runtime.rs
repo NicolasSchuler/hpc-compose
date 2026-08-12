@@ -4750,6 +4750,103 @@ fn cancel_uses_tracked_or_explicit_job_id() {
 }
 
 #[test]
+fn cancel_preserves_scancel_stdout_order_json_field_and_error_precedence() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let compose = write_prepare_compose(tmpdir.path(), cache_root.path());
+    let scancel = tmpdir.path().join("scancel-with-stdout");
+    write_script(
+        &scancel,
+        r#"#!/bin/bash
+set -euo pipefail
+printf 'scheduler accepted %s\n' "$1"
+"#,
+    );
+
+    let text = run_cli(
+        tmpdir.path(),
+        &[
+            "cancel",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "701",
+            "--scancel-bin",
+            scancel.to_str().expect("path"),
+        ],
+    );
+    assert_success(&text);
+    assert_eq!(
+        stdout_text(&text),
+        "scheduler accepted 701\ncancelled job: 701\nnote: no tracked metadata was found for job 701\n"
+    );
+
+    let json = run_cli(
+        tmpdir.path(),
+        &[
+            "cancel",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            "702",
+            "--scancel-bin",
+            scancel.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_success(&json);
+    assert_eq!(
+        stdout_text(&json),
+        r#"{
+  "schema_version": 1,
+  "job_id": "702",
+  "cancelled": true,
+  "command_stdout": "scheduler accepted 702",
+  "tracking_removed": false
+}
+"#
+    );
+
+    let failing_scancel = tmpdir.path().join("scancel-with-both-error-streams");
+    write_script(
+        &failing_scancel,
+        r#"#!/bin/bash
+set -euo pipefail
+printf 'stdout fallback for %s\n' "$1"
+printf 'stderr preferred for %s\n' "$1" >&2
+exit 17
+"#,
+    );
+    for (job_id, format_args) in [("703", &[][..]), ("704", &["--format", "json"][..])] {
+        let mut args = vec![
+            "cancel",
+            "-f",
+            compose.to_str().expect("path"),
+            "--job-id",
+            job_id,
+            "--scancel-bin",
+            failing_scancel.to_str().expect("path"),
+        ];
+        args.extend_from_slice(format_args);
+        let failed = run_cli(tmpdir.path(), &args);
+        assert_failure(&failed);
+        assert!(stdout_text(&failed).is_empty());
+        let stderr = stderr_text(&failed);
+        assert!(
+            stderr.contains(&format!(
+                "scancel failed for job {job_id}: stderr preferred for {job_id}"
+            )),
+            "stderr must win when scancel writes both streams: {stderr}"
+        );
+        assert!(
+            !stderr.contains(&format!("stdout fallback for {job_id}")),
+            "stdout must be ignored when stderr is non-empty: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn cancel_reports_missing_record_and_scancel_failure() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
@@ -6349,6 +6446,74 @@ fn write_latest_notebook_record(root: &Path, config_snapshot_yaml: Option<&str>)
         serde_json::to_string_pretty(&record).expect("record json"),
     )
     .expect("latest notebook record");
+}
+
+#[test]
+fn notebook_promote_skips_offline_context_and_preserves_quiet_output_bytes() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let notebook = tmpdir.path().join("analysis.ipynb");
+    fs::write(&notebook, r#"{"cells":[]}"#).expect("notebook");
+    let snapshot = r#"name: interactive
+services:
+  notebook:
+    image: jupyter/scipy-notebook:latest
+    command:
+      - jupyter
+      - lab
+"#;
+    write_latest_notebook_record(tmpdir.path(), Some(snapshot));
+
+    let missing_settings = tmpdir.path().join("missing-settings.toml");
+    let output_path = tmpdir.path().join("batch.yaml");
+    let record_path = fs::canonicalize(tmpdir.path().join(".hpc-compose/latest-notebook.json"))
+        .expect("canonical record path");
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "--offline",
+            "--settings-file",
+            missing_settings.to_str().expect("path"),
+            "--profile",
+            "missing",
+            "notebook",
+            "promote",
+            notebook.to_str().expect("path"),
+            "--output",
+            output_path.to_str().expect("path"),
+        ],
+    );
+    assert_success(&output);
+    assert_eq!(
+        stdout_text(&output),
+        format!(
+            "promoted notebook batch spec: {}\nrecord: {}\nnext: hpc-compose plan -f {}\n",
+            output_path.display(),
+            record_path.display(),
+            output_path.display()
+        )
+    );
+    assert_eq!(stderr_text(&output), "");
+
+    let quiet_output_path = tmpdir.path().join("quiet-batch.yaml");
+    let quiet = run_cli(
+        tmpdir.path(),
+        &[
+            "--offline",
+            "--quiet",
+            "--settings-file",
+            missing_settings.to_str().expect("path"),
+            "--profile",
+            "missing",
+            "notebook",
+            "promote",
+            notebook.to_str().expect("path"),
+            "--output",
+            quiet_output_path.to_str().expect("path"),
+        ],
+    );
+    assert_success(&quiet);
+    assert_eq!(stdout_text(&quiet), "");
+    assert_eq!(stderr_text(&quiet), "");
 }
 
 #[test]

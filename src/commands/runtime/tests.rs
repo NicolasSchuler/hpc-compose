@@ -635,7 +635,17 @@ fn runtime_command_wrappers_cover_success_and_error_paths() {
 fn local_helper_functions_cover_labels_ids_and_stub_state_paths() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let compose = write_local_compose_with_services(tmpdir.path());
-    let runtime_plan = load::load_runtime_plan(&compose).expect("runtime plan");
+    let mut runtime_plan = load::load_runtime_plan(&compose).expect("runtime plan");
+    runtime_plan.ordered_services[0].name = "api.worker-1".into();
+    runtime_plan.ordered_services[0].failure_policy.mode = ServiceFailureMode::FailJob;
+    runtime_plan.ordered_services[0].placement.mode = ServicePlacementMode::PrimaryNode;
+    runtime_plan.ordered_services[1].failure_policy.mode = ServiceFailureMode::Ignore;
+    runtime_plan.ordered_services[1].placement.mode = ServicePlacementMode::Distributed;
+    let mut retry = runtime_plan.ordered_services[1].clone();
+    retry.name = "retry".into();
+    retry.failure_policy.mode = ServiceFailureMode::RestartOnFailure;
+    retry.placement.mode = ServicePlacementMode::Partitioned;
+    runtime_plan.ordered_services.push(retry);
     let script_path = tmpdir.path().join("job.local.sh");
     let record = build_submission_record_with_backend(
         &compose,
@@ -672,9 +682,9 @@ fn local_helper_functions_cover_labels_ids_and_stub_state_paths() {
         local_placement_mode_label(ServicePlacementMode::Partitioned),
         "partitioned"
     );
-    assert_eq!(local_service_step_name("api"), "hpc-compose:api");
+    assert_eq!(service_step_name("api"), "hpc-compose:api");
     assert_eq!(
-        local_service_step_name("api.worker-1"),
+        service_step_name("api.worker-1"),
         "hpc-compose:api_x2e_worker_x2d_1"
     );
 
@@ -685,10 +695,24 @@ fn local_helper_functions_cover_labels_ids_and_stub_state_paths() {
             .expect("parse state");
     assert_eq!(state["backend"], serde_json::Value::from("local"));
     assert_eq!(state["supervisor_pid"], serde_json::Value::from(777));
-    assert_eq!(state["services"].as_array().map(Vec::len), Some(2));
-    assert_eq!(state["services"][0]["service_name"], "api");
+    assert_eq!(state["services"].as_array().map(Vec::len), Some(3));
+    assert_eq!(state["services"][0]["service_name"], "api.worker-1");
+    assert_eq!(
+        state["services"][0]["step_name"],
+        "hpc-compose:api_x2e_worker_x2d_1"
+    );
+    assert_eq!(state["services"][0]["failure_policy_mode"], "fail_job");
+    assert_eq!(state["services"][0]["placement_mode"], "primary_node");
     assert_eq!(state["services"][0]["readiness_configured"], true);
     assert_eq!(state["services"][1]["service_name"], "worker");
+    assert_eq!(state["services"][1]["failure_policy_mode"], "ignore");
+    assert_eq!(state["services"][1]["placement_mode"], "distributed");
+    assert_eq!(state["services"][2]["service_name"], "retry");
+    assert_eq!(
+        state["services"][2]["failure_policy_mode"],
+        "restart_on_failure"
+    );
+    assert_eq!(state["services"][2]["placement_mode"], "partitioned");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1379,16 +1403,88 @@ fn reclaim_stale_up_invocation_lock_preserves_changed_owner() {
 
 #[test]
 fn sh_quote_leaves_safe_values_and_neutralizes_injection() {
+    assert_eq!(sh_quote(""), "");
     assert_eq!(sh_quote("abc123"), "abc123");
     assert_eq!(
         sh_quote("/path/to-file.ext_v2:tag=1"),
         "/path/to-file.ext_v2:tag=1"
     );
+    assert_eq!(sh_quote("a,b"), "'a,b'");
     assert_eq!(sh_quote("a b"), "'a b'");
     // Shell metacharacters are single-quoted, neutralizing command injection.
     assert_eq!(sh_quote("$(rm -rf /)"), "'$(rm -rf /)'");
     // An embedded single quote is escaped via the '\'' idiom.
     assert_eq!(sh_quote("it's"), "'it'\\''s'");
+}
+
+#[cfg(unix)]
+#[test]
+fn allocation_bootstrap_preserves_legacy_nodelist_file_contract() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let submit_dir = tmpdir.path().join("submit");
+    fs::create_dir_all(&submit_dir).expect("submit dir");
+    let compose = write_local_compose(tmpdir.path());
+    let runtime_plan = load::load_runtime_plan(&compose).expect("runtime plan");
+    let mut context = context_for(&compose, tmpdir.path());
+
+    let scontrol_log = tmpdir.path().join("scontrol.args");
+    let scontrol = tmpdir.path().join("scontrol");
+    fs::write(
+        &scontrol,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\nprintf 'node01\\nnode02\\n'\n",
+            scontrol_log.display()
+        ),
+    )
+    .expect("fake scontrol");
+    let mut permissions = fs::metadata(&scontrol)
+        .expect("scontrol metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&scontrol, permissions).expect("chmod scontrol");
+    context.binaries.scontrol = resolved_string(&scontrol.to_string_lossy());
+
+    let bootstrap = allocation_bootstrap_script(&context, &runtime_plan, &submit_dir);
+    let captured_env = tmpdir.path().join("allocation.env");
+    let output = std::process::Command::new("bash")
+        .arg("-lc")
+        .arg(&bootstrap)
+        .arg("hpc-compose-alloc")
+        .args([
+            "/bin/sh",
+            "-c",
+            "printf '%s\\n%s\\n%s\\n%s\\n' \"$HPC_COMPOSE_NODELIST\" \"$HPC_COMPOSE_NODELIST_FILE\" \"$HPC_COMPOSE_PRIMARY_NODE\" \"$HPC_COMPOSE_NODE_COUNT\" > \"$1\"",
+            "capture-allocation-env",
+        ])
+        .arg(&captured_env)
+        .env("SLURM_JOB_ID", "777")
+        .env("SLURM_JOB_NODELIST", "node[01-02]")
+        .env("SLURM_JOB_NUM_NODES", "2")
+        .output()
+        .expect("run allocation bootstrap");
+    assert!(
+        output.status.success(),
+        "allocation bootstrap failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let legacy_nodelist_file = submit_dir.join(".hpc-compose/777/allocation/nodelist");
+    assert_eq!(
+        fs::read_to_string(&legacy_nodelist_file).expect("legacy nodelist file"),
+        "node01\nnode02\n"
+    );
+    let captured = fs::read_to_string(captured_env).expect("captured allocation env");
+    let lines = captured.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "node[01-02]");
+    assert_eq!(lines[1], legacy_nodelist_file.to_string_lossy());
+    assert_eq!(lines[2], "node01");
+    assert_eq!(lines[3], "2");
+    assert_eq!(
+        fs::read_to_string(scontrol_log).expect("scontrol args"),
+        "show hostnames node[01-02]\n"
+    );
 }
 
 #[test]
@@ -1588,4 +1684,53 @@ fn enrich_sbatch_failure_adds_association_hint_only_for_account_errors() {
     let other = enrich_sbatch_failure("  sbatch: error: Unable to open file script.sh  ");
     assert_eq!(other, "sbatch: error: Unable to open file script.sh");
     assert!(!other.contains("sacctmgr"));
+}
+
+#[test]
+fn when_submit_output_preserves_exact_pretty_json_bytes() {
+    let submission = crate::output::SubmitOutput {
+        schema_version: 1,
+        backend: hpc_compose::job::SubmissionBackend::Slurm,
+        compose_file: PathBuf::from("compose.yaml"),
+        script_path: PathBuf::from("scripts/hpc-compose.sbatch"),
+        cache_dir: PathBuf::from("cache"),
+        dry_run: false,
+        launched: false,
+        submitted: true,
+        sbatch_stdout: None,
+        job_id: None,
+        tracking_persisted: false,
+        tracked_metadata_path: None,
+        endpoints: Vec::new(),
+        next_commands: Vec::new(),
+    };
+    let output = WhenSubmitOutput {
+        schema_version: 1,
+        triggered: true,
+        conditions: &[],
+        submission: &submission,
+    };
+
+    let actual = crate::output::to_pretty_json(&output).expect("serialize when fixture");
+    let expected = r#"{
+  "schema_version": 1,
+  "triggered": true,
+  "conditions": [],
+  "submission": {
+    "schema_version": 1,
+    "backend": "slurm",
+    "compose_file": "compose.yaml",
+    "script_path": "scripts/hpc-compose.sbatch",
+    "cache_dir": "cache",
+    "dry_run": false,
+    "launched": false,
+    "submitted": true,
+    "sbatch_stdout": null,
+    "job_id": null,
+    "tracking_persisted": false,
+    "tracked_metadata_path": null
+  }
+}"#;
+    assert_eq!(actual, expected);
+    assert!(!actual.ends_with('\n'));
 }

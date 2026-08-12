@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::ssh_hint::{OTP_MULTIPLEX_NOTE, ssh_forward_command};
+pub(crate) use crate::output::runtime::NotebookConnectionOutput;
 
 /// Which interactive server preset to launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -269,32 +270,6 @@ pub fn jupyter_tunnel_hint(
     )
 }
 
-/// Machine-readable form of [`NotebookConnection`] for `--format json`.
-///
-/// Mirrors the human-readable output. `compute_node` and `login_host` are the
-/// resolved hosts used to render the tunnel hint; they are descriptive only —
-/// nothing here opens a connection.
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub(crate) struct NotebookConnectionOutput {
-    /// Version of this output document's schema.
-    pub(crate) schema_version: u32,
-    /// The URL to open (localhost for Jupyter, scraped link for VS Code).
-    pub url: String,
-    /// SSH tunnel hint, when one is needed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tunnel_hint: Option<String>,
-    /// Resolved compute node the server runs on.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compute_node: Option<String>,
-    /// Resolved SSH login/jump host.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub login_host: Option<String>,
-    /// Tracked Slurm (or local) job id.
-    pub job_id: String,
-    /// Suggested follow-up commands an agent can run next.
-    pub next_commands: Vec<String>,
-}
-
 /// Builds the machine-readable connection output. Pure; opens no connection.
 #[must_use]
 pub fn build_connection_output(
@@ -533,6 +508,57 @@ mod tests {
         // Round-trips through serde and includes the resolved login host.
         let json = serde_json::to_string(&out).expect("json");
         assert!(json.contains("\"login_host\":\"login01\""));
+    }
+
+    #[test]
+    fn notebook_connection_output_preserves_exact_pretty_json_bytes() {
+        let full = NotebookConnectionOutput {
+            schema_version: 1,
+            url: "http://127.0.0.1:8888/lab?token=abc".to_string(),
+            tunnel_hint: Some("ssh -L 8888:gpu07:8888 login01".to_string()),
+            compute_node: Some("gpu07".to_string()),
+            login_host: Some("login01".to_string()),
+            job_id: "4815162".to_string(),
+            next_commands: vec![
+                "hpc-compose status -f nb.yaml".to_string(),
+                "hpc-compose cancel -f nb.yaml".to_string(),
+            ],
+        };
+        let actual = crate::output::to_pretty_json(&full).expect("serialize notebook fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "url": "http://127.0.0.1:8888/lab?token=abc",
+  "tunnel_hint": "ssh -L 8888:gpu07:8888 login01",
+  "compute_node": "gpu07",
+  "login_host": "login01",
+  "job_id": "4815162",
+  "next_commands": [
+    "hpc-compose status -f nb.yaml",
+    "hpc-compose cancel -f nb.yaml"
+  ]
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+
+        let omitted = NotebookConnectionOutput {
+            schema_version: 1,
+            url: "https://vscode.dev/tunnel/demo".to_string(),
+            tunnel_hint: None,
+            compute_node: None,
+            login_host: None,
+            job_id: "local-1".to_string(),
+            next_commands: Vec::new(),
+        };
+        let actual =
+            crate::output::to_pretty_json(&omitted).expect("serialize omitted notebook fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "url": "https://vscode.dev/tunnel/demo",
+  "job_id": "local-1",
+  "next_commands": []
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
     }
 
     #[test]

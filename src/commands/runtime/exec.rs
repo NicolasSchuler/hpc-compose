@@ -30,7 +30,6 @@ use hpc_compose::render::{
 };
 use hpc_compose::runtime_plan::RuntimePlan;
 use hpc_compose::spec::RuntimeConfig;
-use serde::Serialize;
 
 use super::{
     PrepareFlags, ResourceCliOptions, active_allocation_job_id, allocation_bootstrap_script,
@@ -42,7 +41,9 @@ use super::{
     warn_local_ignored_scheduler_settings, watch_with_fallback, write_local_runtime_state_stub,
 };
 use crate::commands::load;
+use crate::domain::extract_human_sbatch_job_id;
 use crate::output;
+pub(crate) use crate::output::runtime::NotebookDryRunOutput;
 use crate::progress::{PrepareProgress, ProgressReporter};
 use crate::{term, watch_ui};
 use hpc_compose::cli::OutputFormat;
@@ -363,7 +364,7 @@ pub(crate) fn run_service(
     print!("{stdout}");
     output::print_submit_details(&runtime_plan, &script_path, stdout.trim())?;
 
-    let Some(job_id) = output::extract_job_id(stdout.trim()) else {
+    let Some(job_id) = extract_human_sbatch_job_id(stdout.trim()) else {
         println!(
             "note: sbatch output did not include a numeric Slurm job id, so this run is not trackable"
         );
@@ -665,7 +666,7 @@ pub(crate) fn run_ephemeral(
     print!("{stdout}");
     output::print_submit_details(&runtime_plan, &script_path, stdout.trim())?;
 
-    let Some(job_id) = output::extract_job_id(stdout.trim()) else {
+    let Some(job_id) = extract_human_sbatch_job_id(stdout.trim()) else {
         println!(
             "note: sbatch output did not include a numeric Slurm job id, so this run is not trackable"
         );
@@ -824,16 +825,6 @@ fn print_notebook_connection(connection: &NotebookConnection) {
         println!();
         println!("{}", hint);
     }
-}
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct NotebookDryRunOutput {
-    pub(crate) schema_version: u32,
-    dry_run: bool,
-    submitted: bool,
-    kind: String,
-    script_path: PathBuf,
-    cache_dir: PathBuf,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1083,7 +1074,7 @@ pub(crate) fn notebook(
             print!("{stdout}");
             output::print_submit_details(&runtime_plan, &script_path, stdout.trim())?;
         }
-        let Some(job_id) = output::extract_job_id(stdout.trim()) else {
+        let Some(job_id) = extract_human_sbatch_job_id(stdout.trim()) else {
             bail!(
                 "sbatch output did not include a numeric Slurm job id; cannot track the notebook"
             );
@@ -1189,4 +1180,36 @@ pub(crate) fn notebook(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::NotebookDryRunOutput;
+
+    #[test]
+    fn notebook_dry_run_output_preserves_exact_pretty_json_bytes() {
+        let output = NotebookDryRunOutput {
+            schema_version: 1,
+            dry_run: true,
+            submitted: false,
+            kind: "jupyter".to_string(),
+            script_path: PathBuf::from("scripts/notebook.sbatch"),
+            cache_dir: PathBuf::from("cache"),
+        };
+
+        let actual =
+            crate::output::to_pretty_json(&output).expect("serialize notebook dry-run fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "dry_run": true,
+  "submitted": false,
+  "kind": "jupyter",
+  "script_path": "scripts/notebook.sbatch",
+  "cache_dir": "cache"
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+    }
 }

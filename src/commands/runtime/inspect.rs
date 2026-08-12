@@ -319,7 +319,8 @@ pub(crate) fn diff_against_spec(
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
-    let current_yaml = output::effective_config_yaml(&effective_config, &context.secret_values())?;
+    let current_yaml =
+        crate::job::effective_config_snapshot_yaml(&effective_config, &context.secret_values())?;
     let mut report = build_spec_diff_report(
         &record.job_id,
         record.submitted_at,

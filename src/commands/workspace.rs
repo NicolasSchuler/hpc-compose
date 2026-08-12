@@ -3,10 +3,8 @@
 //! [`hpc_compose::workspace`]; Phase 1 runs the tools locally (login node or
 //! dev machine) — up/preflight integration and `--remote` come later.
 
-use std::path::PathBuf;
-
 use anyhow::{Context, Result, bail};
-use hpc_compose::cli::{OutputFormat, WorkspaceToolArgs};
+use hpc_compose::cli::{OutputFormat, WorkspaceCommands, WorkspaceToolArgs};
 use hpc_compose::context::ResolvedContext;
 use hpc_compose::job::scan_job_records;
 use hpc_compose::workspace::{
@@ -19,79 +17,9 @@ use serde::Serialize;
 
 use crate::commands::confirm;
 use crate::output::{OUTPUT_SCHEMA_VERSION, resolve_output_format};
-
-/// `workspace status` JSON output (`--format json`).
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct WorkspaceStatusOutput {
-    pub(crate) schema_version: u32,
-    /// Selected settings profile; `None` when running without a profile.
-    pub(crate) profile: Option<String>,
-    /// Configured workspace name.
-    pub(crate) name: String,
-    /// Whether `ws_find` located the workspace.
-    pub(crate) exists: bool,
-    /// Workspace path from `ws_find`; `None` when it does not exist.
-    pub(crate) path: Option<PathBuf>,
-    /// Absolute expiry time (unix seconds) computed from `ws_list`'s
-    /// remaining time; `None` when unavailable.
-    pub(crate) expiry_epoch: Option<u64>,
-    /// Raw remaining-time string from `ws_list`.
-    pub(crate) remaining_display: Option<String>,
-    /// Raw expiration-date string from `ws_list` (display fallback when the
-    /// remaining time could not be parsed).
-    pub(crate) expiry_display: Option<String>,
-    /// Extensions still available per `ws_list`.
-    pub(crate) extensions_remaining: Option<u32>,
-    /// Persisted workspace state file refreshed by this command.
-    pub(crate) state_path: PathBuf,
-}
-
-/// `workspace allocate` JSON output (`--format json`).
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct WorkspaceAllocateOutput {
-    pub(crate) schema_version: u32,
-    pub(crate) profile: Option<String>,
-    pub(crate) name: String,
-    /// True when the workspace already existed and `ws_allocate` was skipped.
-    pub(crate) already_allocated: bool,
-    /// Days passed to `ws_allocate`; `None` when it already existed.
-    pub(crate) duration_days: Option<u32>,
-    pub(crate) path: PathBuf,
-    pub(crate) expiry_epoch: Option<u64>,
-    pub(crate) remaining_display: Option<String>,
-    pub(crate) expiry_display: Option<String>,
-    pub(crate) extensions_remaining: Option<u32>,
-    pub(crate) state_path: PathBuf,
-}
-
-/// `workspace extend` JSON output (`--format json`).
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct WorkspaceExtendOutput {
-    pub(crate) schema_version: u32,
-    pub(crate) profile: Option<String>,
-    pub(crate) name: String,
-    /// Days passed to `ws_extend`.
-    pub(crate) days: u32,
-    pub(crate) path: PathBuf,
-    pub(crate) expiry_epoch: Option<u64>,
-    pub(crate) remaining_display: Option<String>,
-    pub(crate) expiry_display: Option<String>,
-    pub(crate) extensions_remaining: Option<u32>,
-    pub(crate) state_path: PathBuf,
-}
-
-/// `workspace release` JSON output (`--format json`).
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct WorkspaceReleaseOutput {
-    pub(crate) schema_version: u32,
-    pub(crate) profile: Option<String>,
-    pub(crate) name: String,
-    /// True when `ws_release` ran; false when there was nothing to release.
-    pub(crate) released: bool,
-    /// Path the workspace had before release; `None` when it did not exist.
-    pub(crate) path: Option<PathBuf>,
-    pub(crate) state_path: PathBuf,
-}
+pub(crate) use crate::output::{
+    WorkspaceAllocateOutput, WorkspaceExtendOutput, WorkspaceReleaseOutput, WorkspaceStatusOutput,
+};
 
 fn tools_from_args(args: &WorkspaceToolArgs) -> WorkspaceTools {
     WorkspaceTools {
@@ -200,6 +128,23 @@ fn print_json<T: Serialize>(output: &T, what: &str) -> Result<()> {
             .with_context(|| format!("failed to serialize {what} output"))?
     );
     Ok(())
+}
+
+pub(crate) fn run(context: ResolvedContext, command: WorkspaceCommands) -> Result<()> {
+    match command {
+        WorkspaceCommands::Status { tools, format } => status(context, &tools, format),
+        WorkspaceCommands::Allocate {
+            duration_days,
+            tools,
+            format,
+        } => allocate(context, duration_days, &tools, format),
+        WorkspaceCommands::Extend {
+            days,
+            tools,
+            format,
+        } => extend(context, days, &tools, format),
+        WorkspaceCommands::Release { yes, tools, format } => release(context, yes, &tools, format),
+    }
 }
 
 pub(crate) fn status(
@@ -483,4 +428,121 @@ pub(crate) fn release(
         OutputFormat::Json => print_json(&output, "workspace release")?,
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn workspace_output_dtos_preserve_exact_null_json_bytes() {
+        let status = WorkspaceStatusOutput {
+            schema_version: 1,
+            profile: None,
+            name: "fixture-workspace".to_string(),
+            exists: false,
+            path: None,
+            expiry_epoch: None,
+            remaining_display: None,
+            expiry_display: None,
+            extensions_remaining: None,
+            state_path: PathBuf::from("state/status.toml"),
+        };
+        let actual = crate::output::to_pretty_json(&status).expect("serialize workspace status");
+        let expected = r#"{
+  "schema_version": 1,
+  "profile": null,
+  "name": "fixture-workspace",
+  "exists": false,
+  "path": null,
+  "expiry_epoch": null,
+  "remaining_display": null,
+  "expiry_display": null,
+  "extensions_remaining": null,
+  "state_path": "state/status.toml"
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+
+        let allocate = WorkspaceAllocateOutput {
+            schema_version: 1,
+            profile: None,
+            name: "fixture-workspace".to_string(),
+            already_allocated: true,
+            duration_days: None,
+            path: PathBuf::from("workspace/path"),
+            expiry_epoch: None,
+            remaining_display: None,
+            expiry_display: None,
+            extensions_remaining: None,
+            state_path: PathBuf::from("state/allocate.toml"),
+        };
+        let actual =
+            crate::output::to_pretty_json(&allocate).expect("serialize workspace allocate");
+        let expected = r#"{
+  "schema_version": 1,
+  "profile": null,
+  "name": "fixture-workspace",
+  "already_allocated": true,
+  "duration_days": null,
+  "path": "workspace/path",
+  "expiry_epoch": null,
+  "remaining_display": null,
+  "expiry_display": null,
+  "extensions_remaining": null,
+  "state_path": "state/allocate.toml"
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+
+        let extend = WorkspaceExtendOutput {
+            schema_version: 1,
+            profile: None,
+            name: "fixture-workspace".to_string(),
+            days: 7,
+            path: PathBuf::from("workspace/path"),
+            expiry_epoch: None,
+            remaining_display: None,
+            expiry_display: None,
+            extensions_remaining: None,
+            state_path: PathBuf::from("state/extend.toml"),
+        };
+        let actual = crate::output::to_pretty_json(&extend).expect("serialize workspace extend");
+        let expected = r#"{
+  "schema_version": 1,
+  "profile": null,
+  "name": "fixture-workspace",
+  "days": 7,
+  "path": "workspace/path",
+  "expiry_epoch": null,
+  "remaining_display": null,
+  "expiry_display": null,
+  "extensions_remaining": null,
+  "state_path": "state/extend.toml"
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+
+        let release = WorkspaceReleaseOutput {
+            schema_version: 1,
+            profile: None,
+            name: "fixture-workspace".to_string(),
+            released: false,
+            path: None,
+            state_path: PathBuf::from("state/release.toml"),
+        };
+        let actual = crate::output::to_pretty_json(&release).expect("serialize workspace release");
+        let expected = r#"{
+  "schema_version": 1,
+  "profile": null,
+  "name": "fixture-workspace",
+  "released": false,
+  "path": null,
+  "state_path": "state/release.toml"
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+    }
 }

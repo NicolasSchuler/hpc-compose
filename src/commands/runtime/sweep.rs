@@ -26,12 +26,16 @@ use hpc_compose::spec::ComposeSpec;
 use serde::Serialize;
 
 use super::{
-    PreparedSlurmSubmission, collect_submit_provenance, latest_record_path,
-    load_discovered_cluster_profile, requested_walltime, resolve_tracked_record,
-    submit_prepared_slurm_submission, tracked_cached_artifacts,
+    PreparedSlurmSubmission, cancel_job_with_text_output, collect_submit_provenance,
+    latest_record_path, load_discovered_cluster_profile, requested_walltime,
+    resolve_tracked_record, submit_prepared_slurm_submission, tracked_cached_artifacts,
 };
 use crate::commands::load;
 use crate::output;
+use crate::output::SweepStatsTrial;
+pub(crate) use crate::output::{
+    SweepListOutput, SweepStatsOutput, SweepStopOutput, SweepSubmitOutput,
+};
 use crate::progress::{PrepareProgress, ProgressReporter};
 use crate::term;
 use crate::time_util::unix_timestamp_now;
@@ -148,24 +152,6 @@ fn best_group_mean(
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct SweepSubmitOutput<'a> {
-    pub(crate) schema_version: u32,
-    dry_run: bool,
-    /// True when this run resumed an existing sweep (`--resume`) rather than
-    /// submitting a fresh one.
-    resumed: bool,
-    /// Number of trials (re)submitted by a resume run. Omitted for a fresh submit.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    resubmitted: Option<usize>,
-    /// Number of trials a resume run left untouched because they already had a
-    /// job. Omitted for a fresh submit.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    skipped_already_submitted: Option<usize>,
-    manifest_path: Option<PathBuf>,
-    manifest: &'a SweepManifest,
-}
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct SweepStatusOutput {
     pub(crate) schema_version: u32,
     sweep_id: String,
@@ -190,13 +176,6 @@ struct SweepStatusTrialOutput {
     record_path: Option<PathBuf>,
     submit_error: Option<String>,
     detail: Option<String>,
-}
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct SweepListOutput {
-    pub(crate) schema_version: u32,
-    compose_file: PathBuf,
-    sweeps: Vec<SweepManifest>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -599,7 +578,7 @@ fn submit_sweep_trial(
             &context.resource_profiles,
         )?;
     let effective_config_yaml =
-        output::effective_config_yaml(&effective_config, &context.secret_values())?;
+        crate::job::effective_config_snapshot_yaml(&effective_config, &context.secret_values())?;
     let runtime_plan =
         load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &file,
@@ -1633,7 +1612,13 @@ pub(crate) fn sweep_observe(
                     );
                 }
                 let reason = format!("stop-when condition '{expr}' satisfied");
-                let report = sweep_stop_inner(&context, sweep_id.as_deref(), true, Some(reason))?;
+                let report = sweep_stop_inner(
+                    &context,
+                    sweep_id.as_deref(),
+                    true,
+                    Some(reason),
+                    output_format,
+                )?;
                 if output_format == OutputFormat::Text {
                     print_sweep_stop_output(&report);
                 }
@@ -1784,7 +1769,7 @@ pub(crate) fn sweep_stop(
     format: Option<OutputFormat>,
 ) -> Result<()> {
     let output_format = output::resolve_output_format(format);
-    let report = sweep_stop_inner(&context, sweep_id.as_deref(), yes, reason)?;
+    let report = sweep_stop_inner(&context, sweep_id.as_deref(), yes, reason, output_format)?;
     match output_format {
         OutputFormat::Text => print_sweep_stop_output(&report),
         OutputFormat::Json => {
@@ -1798,23 +1783,12 @@ pub(crate) fn sweep_stop(
     Ok(())
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct SweepStopOutput {
-    pub(crate) schema_version: u32,
-    sweep_id: String,
-    cancelled_count: usize,
-    skipped_count: usize,
-    cancelled_trials: Vec<String>,
-    skipped_trials: Vec<String>,
-    stopped_at: u64,
-    stop_reason: String,
-}
-
 fn sweep_stop_inner(
     context: &ResolvedContext,
     sweep_id: Option<&str>,
     yes: bool,
     reason: Option<String>,
+    output_format: OutputFormat,
 ) -> Result<SweepStopOutput> {
     let scheduler_options = SchedulerOptions {
         squeue_bin: context.binaries.squeue.value.clone(),
@@ -1845,7 +1819,15 @@ fn sweep_stop_inner(
             skipped.push(trial.trial_id.clone());
             continue;
         }
-        match crate::job::cancel_job(job_id, &context.binaries.scancel.value) {
+        let cancellation = match output_format {
+            OutputFormat::Text => {
+                cancel_job_with_text_output(job_id, &context.binaries.scancel.value)
+            }
+            OutputFormat::Json => {
+                crate::job::cancel_job(job_id, &context.binaries.scancel.value).map(|_stdout| ())
+            }
+        };
+        match cancellation {
             Ok(()) => cancelled.push(trial.trial_id.clone()),
             Err(err) => {
                 skipped.push(trial.trial_id.clone());
@@ -2325,27 +2307,6 @@ pub(crate) fn score_sweep(
     Ok(())
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct SweepStatsOutput {
-    pub(crate) schema_version: u32,
-    sweep_id: String,
-    trials: Vec<SweepStatsTrial>,
-}
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-struct SweepStatsTrial {
-    trial_id: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    config_key: String,
-    replicate: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    job_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    snapshot: Option<hpc_compose::job::StatsSnapshot>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
 /// Per-trial runtime metrics/step-stats collection over a sweep (read-only).
 pub(crate) fn stats_sweep(
     context: ResolvedContext,
@@ -2427,6 +2388,110 @@ pub(crate) fn stats_sweep(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sweep_manifest_fixture() -> SweepManifest {
+        SweepManifest {
+            schema_version: 3,
+            sweep_id: "sweep-fixed".to_string(),
+            compose_file: PathBuf::from("compose.yaml"),
+            submitted_at: 123,
+            matrix: "grid".to_string(),
+            compose_file_sha256: None,
+            seed: None,
+            total_combinations: 0,
+            objective: None,
+            best_trial: None,
+            stopped_at: None,
+            stop_reason: None,
+            trials: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sweep_outputs_preserve_exact_pretty_json_bytes() {
+        let manifest = sweep_manifest_fixture();
+        let submit = SweepSubmitOutput {
+            schema_version: 1,
+            dry_run: true,
+            resumed: false,
+            resubmitted: None,
+            skipped_already_submitted: None,
+            manifest_path: None,
+            manifest: &manifest,
+        };
+        let actual =
+            crate::output::to_pretty_json(&submit).expect("serialize sweep submit fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "dry_run": true,
+  "resumed": false,
+  "manifest_path": null,
+  "manifest": {
+    "schema_version": 3,
+    "sweep_id": "sweep-fixed",
+    "compose_file": "compose.yaml",
+    "submitted_at": 123,
+    "matrix": "grid",
+    "total_combinations": 0,
+    "stopped_at": null,
+    "trials": []
+  }
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+
+        let list = SweepListOutput {
+            schema_version: 1,
+            compose_file: PathBuf::from("compose.yaml"),
+            sweeps: vec![sweep_manifest_fixture()],
+        };
+        let actual = crate::output::to_pretty_json(&list).expect("serialize sweep list fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "compose_file": "compose.yaml",
+  "sweeps": [
+    {
+      "schema_version": 3,
+      "sweep_id": "sweep-fixed",
+      "compose_file": "compose.yaml",
+      "submitted_at": 123,
+      "matrix": "grid",
+      "total_combinations": 0,
+      "stopped_at": null,
+      "trials": []
+    }
+  ]
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+
+        let stats = SweepStatsOutput {
+            schema_version: 1,
+            sweep_id: "sweep-fixed".to_string(),
+            trials: vec![SweepStatsTrial {
+                trial_id: "trial-000".to_string(),
+                config_key: String::new(),
+                replicate: 0,
+                job_id: None,
+                snapshot: None,
+                error: Some("trial has no recorded job id".to_string()),
+            }],
+        };
+        let actual = crate::output::to_pretty_json(&stats).expect("serialize sweep stats fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "sweep_id": "sweep-fixed",
+  "trials": [
+    {
+      "trial_id": "trial-000",
+      "replicate": 0,
+      "error": "trial has no recorded job id"
+    }
+  ]
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+    }
 
     fn vars(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs

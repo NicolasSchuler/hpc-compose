@@ -26,7 +26,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use hpc_compose::cache::CacheEntryManifest;
-use hpc_compose::diagnostics::Notice;
+use hpc_compose::diagnostics::{GroupedReport, Notice};
 use hpc_compose::docs_search::DocsSearchOutput;
 use hpc_compose::evolve::EvolveRunReport;
 use hpc_compose::job::{
@@ -34,7 +34,6 @@ use hpc_compose::job::{
     JobInventoryScan, JobMatrixReport, MetricsProbeReport, PsSnapshot, ReplayReport,
     RightsizeReport, SpecDiffReport, StatsSnapshot, StatusSnapshot,
 };
-use hpc_compose::preflight::GroupedReport;
 use hpc_compose::prepare::PrepareSummary;
 use hpc_compose::rendezvous::{RendezvousPruneReport, RendezvousRecord};
 use hpc_compose::runtime_plan::RuntimePlan;
@@ -236,47 +235,47 @@ output_schemas! {
     // Effective-config outputs: printed as a (redacted) value of these types.
     "spec-config" => EffectiveComposeConfig,
     "spec-inspect" => RuntimePlan,
-    // Command-local DTOs (each carries its own `schema_version` field).
-    "sweep-submit" => crate::commands::runtime::sweep::SweepSubmitOutput<'static>,
+    // Command output DTOs (each carries its own `schema_version` field).
+    "sweep-submit" => super::sweep::SweepSubmitOutput<'static>,
     "sweep-status" => crate::commands::runtime::sweep::SweepStatusOutput,
-    "sweep-list" => crate::commands::runtime::sweep::SweepListOutput,
+    "sweep-list" => super::sweep::SweepListOutput,
     "sweep-observe" => crate::commands::runtime::sweep::SweepObserveOutput,
-    "sweep-stop" => crate::commands::runtime::sweep::SweepStopOutput,
+    "sweep-stop" => super::sweep::SweepStopOutput,
     "sweep-results" => crate::commands::runtime::sweep::SweepResultsOutput,
     "sweep-score" => crate::commands::runtime::sweep::SweepScoreOutput,
-    "sweep-stats" => crate::commands::runtime::sweep::SweepStatsOutput,
+    "sweep-stats" => super::sweep::SweepStatsOutput,
     "doctor-mpi-smoke" => crate::commands::doctor::MpiSmokeJsonOutput,
     "doctor-fabric-smoke" => crate::commands::doctor::FabricSmokeJsonOutput,
-    "doctor-readiness" => crate::commands::doctor::ReadinessDoctorOutput,
-    "doctor-cluster-report" => crate::commands::doctor::ClusterReportJsonOutput<'static>,
+    "doctor-readiness" => super::doctor::ReadinessDoctorOutput,
+    "doctor-cluster-report" => super::doctor::ClusterReportJsonOutput<'static>,
     "docs" => DocsSearchOutput,
-    "feedback" => crate::commands::feedback::FeedbackOutput,
+    "feedback" => super::FeedbackOutput,
     "diagnostic-notice" => Notice,
-    "experiment" => crate::commands::runtime::experiment::ExperimentShowOutput,
+    "experiment" => super::runtime::ExperimentShowOutput,
     "experiment-bundle" => hpc_compose::job::ExperimentBundleManifest,
-    "experiment-tag" => crate::commands::runtime::experiment::ExperimentTagOutput,
-    "experiment-note" => crate::commands::runtime::experiment::ExperimentNoteOutput,
-    "germinate" => crate::commands::runtime::germinate::GerminateOutput<'static>,
-    "when" => crate::commands::runtime::WhenSubmitOutput<'static>,
+    "experiment-tag" => super::runtime::ExperimentTagOutput,
+    "experiment-note" => super::runtime::ExperimentNoteOutput,
+    "germinate" => super::runtime::GerminateOutput<'static>,
+    "when" => super::runtime::WhenSubmitOutput<'static>,
     "test" => crate::commands::runtime::SmokeTestOutput,
-    "pull" => crate::commands::runtime::pull::PullOutput,
-    "reach" => crate::commands::runtime::reach::ReachOutput,
-    "notebook-dry-run" => crate::commands::runtime::exec::NotebookDryRunOutput,
-    "notebook" => crate::commands::runtime::notebook::NotebookConnectionOutput,
-    "debug" => crate::commands::runtime::debug::DebugReport,
-    "rendezvous-register" => crate::commands::runtime::rendezvous_cmd::RendezvousRegisterOutput,
-    "explain" => crate::commands::spec::ExplainOutput,
-    "lint" => crate::commands::spec::LintOutput,
-    "plan" => crate::commands::spec::PlanOutput,
-    "context" => crate::commands::spec::ContextOutput,
-    "workspace-status" => crate::commands::workspace::WorkspaceStatusOutput,
-    "workspace-allocate" => crate::commands::workspace::WorkspaceAllocateOutput,
-    "workspace-extend" => crate::commands::workspace::WorkspaceExtendOutput,
-    "workspace-release" => crate::commands::workspace::WorkspaceReleaseOutput,
-    "lessons-list" => crate::commands::evolve::LessonListOutput,
-    "lessons-describe" => crate::commands::evolve::LessonDescriptionOutput,
-    "examples-list" => crate::commands::examples::ExamplesListOutput<'static>,
-    "examples-recommend" => crate::commands::examples::ExamplesRecommendOutput<'static>,
+    "pull" => super::runtime::PullOutput,
+    "reach" => super::runtime::ReachOutput,
+    "notebook-dry-run" => super::runtime::NotebookDryRunOutput,
+    "notebook" => super::runtime::NotebookConnectionOutput,
+    "debug" => super::runtime::DebugReport,
+    "rendezvous-register" => super::runtime::RendezvousRegisterOutput,
+    "explain" => super::spec::ExplainOutput,
+    "lint" => super::spec::LintOutput,
+    "plan" => super::spec::PlanOutput,
+    "context" => super::spec::ContextOutput,
+    "workspace-status" => super::WorkspaceStatusOutput,
+    "workspace-allocate" => super::WorkspaceAllocateOutput,
+    "workspace-extend" => super::WorkspaceExtendOutput,
+    "workspace-release" => super::WorkspaceReleaseOutput,
+    "lessons-list" => super::evolve::LessonListOutput,
+    "lessons-describe" => super::evolve::LessonDescriptionOutput,
+    "examples-list" => super::ExamplesListOutput<'static>,
+    "examples-recommend" => super::ExamplesRecommendOutput<'static>,
     "vars" => InterpolationVarsOutput,
     "init-list" => TemplateListOutput,
 }

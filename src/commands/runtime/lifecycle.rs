@@ -1,8 +1,7 @@
 use std::env;
 use std::path::PathBuf;
-use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use hpc_compose::cli::OutputFormat;
 use hpc_compose::context::{ResolvedContext, ValueSource};
 use hpc_compose::job::{
@@ -12,8 +11,8 @@ use hpc_compose::job::{
 };
 
 use super::{
-    cached_artifacts_for_teardown, kill_pid_if_running, latest_record_path, purge_cached_artifacts,
-    read_local_supervisor_pid, resolve_tracked_record,
+    cached_artifacts_for_teardown, cancel_job_with_text_output, kill_pid_if_running,
+    latest_record_path, purge_cached_artifacts, read_local_supervisor_pid, resolve_tracked_record,
 };
 use crate::commands::load;
 use crate::output;
@@ -136,7 +135,7 @@ pub(crate) fn cancel(
 
     match output::resolve_output_format(format) {
         OutputFormat::Text => {
-            crate::job::cancel_job(&resolved_job_id, &context.binaries.scancel.value)?;
+            cancel_job_with_text_output(&resolved_job_id, &context.binaries.scancel.value)?;
             let tracking_removed = if let Some(record) = record.as_ref() {
                 remove_submission_record(record)?;
                 println!(
@@ -161,23 +160,7 @@ pub(crate) fn cancel(
             Ok(())
         }
         OutputFormat::Json => {
-            let output = Command::new(&context.binaries.scancel.value)
-                .arg(&resolved_job_id)
-                .output()
-                .context(format!(
-                    "failed to execute '{}'",
-                    context.binaries.scancel.value
-                ))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let detail = if !stderr.is_empty() { stderr } else { stdout };
-                if detail.is_empty() {
-                    bail!("scancel failed for job {resolved_job_id}");
-                }
-                bail!("scancel failed for job {resolved_job_id}: {detail}");
-            }
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stdout = crate::job::cancel_job(&resolved_job_id, &context.binaries.scancel.value)?;
             let tracking_removed = if let Some(record) = record.as_ref() {
                 remove_submission_record(record)?;
                 Some(true)

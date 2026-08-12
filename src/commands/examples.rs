@@ -1,8 +1,23 @@
 use anyhow::Result;
-use hpc_compose::cli::{ExamplesOutputFormat, OutputFormat};
+use hpc_compose::cli::{ExamplesCommands, ExamplesOutputFormat, OutputFormat};
 use hpc_compose::examples::{ExampleInfo, ExampleRecommendation, examples, recommend_examples};
 use hpc_compose::term;
-use serde::Serialize;
+
+pub(crate) use crate::output::{ExamplesListOutput, ExamplesRecommendOutput};
+
+pub(crate) fn run(command: ExamplesCommands) -> Result<()> {
+    match command {
+        ExamplesCommands::List { tag, format } => list(tag, format),
+        ExamplesCommands::Search { query, format } => search(query, format),
+        ExamplesCommands::Recommend {
+            query,
+            tags,
+            limit,
+            format,
+        } => recommend(query, tags, limit, format),
+        ExamplesCommands::Coverage { format } => coverage(format),
+    }
+}
 
 pub(crate) fn list(tag: Option<String>, format: Option<ExamplesOutputFormat>) -> Result<()> {
     let entries = examples()
@@ -39,23 +54,6 @@ pub(crate) fn recommend(
         &recommendations,
         format.unwrap_or(OutputFormat::Text),
     )
-}
-
-/// `examples list` / `search` / `coverage` JSON output.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct ExamplesListOutput<'a> {
-    pub(crate) schema_version: u32,
-    pub(crate) examples: &'a [ExampleInfo],
-}
-
-/// `examples recommend` JSON output.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct ExamplesRecommendOutput<'a> {
-    pub(crate) schema_version: u32,
-    pub(crate) query: Option<&'a str>,
-    pub(crate) required_tags: &'a [String],
-    pub(crate) safe_authoring_note: &'static str,
-    pub(crate) recommendations: &'a [ExampleRecommendation],
 }
 
 fn print_examples(entries: &[ExampleInfo], format: ExamplesOutputFormat) -> Result<()> {
@@ -213,6 +211,42 @@ fn markdown_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn examples_output_dtos_preserve_exact_empty_json_bytes() {
+        let list = ExamplesListOutput {
+            schema_version: 1,
+            examples: &[],
+        };
+        let actual = crate::output::to_pretty_json(&list).expect("serialize examples list");
+        let expected = r#"{
+  "schema_version": 1,
+  "examples": []
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+
+        let tags = Vec::<String>::new();
+        let recommendations = Vec::<ExampleRecommendation>::new();
+        let recommend = ExamplesRecommendOutput {
+            schema_version: 1,
+            query: None,
+            required_tags: &tags,
+            safe_authoring_note: "",
+            recommendations: &recommendations,
+        };
+        let actual =
+            crate::output::to_pretty_json(&recommend).expect("serialize examples recommendations");
+        let expected = r#"{
+  "schema_version": 1,
+  "query": null,
+  "required_tags": [],
+  "safe_authoring_note": "",
+  "recommendations": []
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+    }
 
     #[test]
     fn coverage_table_contains_tags_and_examples() {

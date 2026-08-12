@@ -68,8 +68,6 @@ pub use bundle::{
 pub use checkpoints::{
     CheckpointAttempt, CheckpointAttemptService, CheckpointHistory, collect_checkpoint_history,
 };
-// Transitional facade for command call sites moved in the next commit.
-#[allow(unused_imports)]
 pub(crate) use config_snapshot::effective_config_snapshot_yaml;
 pub use deep_clean::{
     DeepCleanupDetails, OrphanRuntimeDirReport, build_deep_cleanup_report, run_deep_cleanup_report,

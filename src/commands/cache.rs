@@ -10,8 +10,10 @@ use hpc_compose::context::{ResolvedContext, ValueSource};
 use crate::commands::load;
 use crate::output::{cache as output_cache, common as output_common};
 
+mod inspect_report;
+
 pub(crate) fn list(cache_dir: Option<PathBuf>, format: Option<OutputFormat>) -> Result<()> {
-    let cache_dir = cache_dir.unwrap_or_else(output_common::default_cache_dir);
+    let cache_dir = cache_dir.unwrap_or_else(crate::path_util::default_cache_dir);
     let manifests = scan_cache(&cache_dir)?;
     match output_common::resolve_output_format(format) {
         OutputFormat::Text => {
@@ -60,7 +62,7 @@ pub(crate) fn inspect(
             Some(&context.cache_dir.value),
             &context.resource_profiles,
         )?;
-    let report = output_cache::build_cache_inspect_report(&runtime_plan, service.as_deref())?;
+    let report = inspect_report::build(&runtime_plan, service.as_deref())?;
     match output_common::resolve_output_format(format) {
         OutputFormat::Text => output_cache::print_cache_inspect(&report)?,
         OutputFormat::Json => {
@@ -190,7 +192,7 @@ pub(crate) fn prune_no_context(
     format: Option<OutputFormat>,
 ) -> Result<()> {
     let days = age.context("cache prune --age requires a day value")?;
-    let target = cache_dir.unwrap_or_else(output_common::default_cache_dir);
+    let target = cache_dir.unwrap_or_else(crate::path_util::default_cache_dir);
     let result = prune_by_age(&target, days)?;
     let report = output_cache::CachePruneReport {
         schema_version: crate::output::OUTPUT_SCHEMA_VERSION,

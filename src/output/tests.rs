@@ -338,48 +338,36 @@ fn action_and_label_helpers_cover_all_variants() {
     assert_eq!(artifact_role_label("base"), "cache artifact");
     assert_eq!(artifact_role_label("runtime"), "artifact");
     assert_eq!(artifact_role_label("other"), "artifact");
-    assert_eq!(hit_or_miss(true), "cache hit");
-    assert_eq!(hit_or_miss(false), "cache miss");
     assert_eq!(yes_no(true), "yes");
     assert_eq!(yes_no(false), "no");
 }
 
 #[test]
-fn sanitize_and_extract_job_id_work() {
+fn cache_artifact_state_observes_path_presence() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let artifact = tmpdir.path().join("artifact.sqsh");
+
     assert_eq!(
-        log_file_name_for_service("svc/name.with spaces"),
-        "svc_x2f_name_x2e_with_x20_spaces.log"
+        artifact_presence(&artifact).cache_state_label(),
+        "cache miss"
     );
-    assert_eq!(extract_job_id("Submitted batch job 12345"), Some("12345"));
-    assert_eq!(extract_job_id("no job id here"), None);
+    fs::write(&artifact, "artifact").expect("artifact");
+    assert_eq!(
+        artifact_presence(&artifact).cache_state_label(),
+        "cache hit"
+    );
+    fs::remove_file(&artifact).expect("remove artifact");
+    assert_eq!(
+        artifact_presence(&artifact).cache_state_label(),
+        "cache miss"
+    );
 }
 
 #[test]
-fn extract_job_id_handles_real_world_sbatch_shapes() {
-    // Embedded in multi-line output (site module banners, etc.).
+fn sanitize_service_log_file_name_work() {
     assert_eq!(
-        extract_job_id("Loading site module\nSubmitted batch job 67890\n"),
-        Some("67890")
-    );
-    // A trailing parenthetical does not derail the match (its tokens aren't all-digit).
-    assert_eq!(
-        extract_job_id("Submitted batch job 42 (cluster=gpu)"),
-        Some("42")
-    );
-    // Leading banner numbers are ignored because only the Slurm submission marker
-    // starts the id.
-    assert_eq!(
-        extract_job_id("Reservation 7 active\nSubmitted batch job 13579"),
-        Some("13579")
-    );
-    // No numeric token at all.
-    assert_eq!(extract_job_id(""), None);
-    assert_eq!(extract_job_id("   \n  "), None);
-    assert_eq!(extract_job_id("no numeric token here"), None);
-    // Trailing numeric tokens after the submission line do not override the id.
-    assert_eq!(
-        extract_job_id("Submitted batch job 12345\nnodes 8"),
-        Some("12345")
+        log_file_name_for_service("svc/name.with spaces"),
+        "svc_x2f_name_x2e_with_x20_spaces.log"
     );
 }
 
@@ -421,8 +409,10 @@ fn finish_watch_requires_a_terminal_scheduler_result() {
 fn runtime_cache_state_covers_prepare_and_local_paths() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let local_sqsh = tmpdir.path().join("local.sqsh");
+    let local_sif = tmpdir.path().join("local.sif");
     let remote_sqsh = tmpdir.path().join("remote.sqsh");
     std::fs::write(&local_sqsh, "x").expect("local");
+    std::fs::write(&local_sif, "x").expect("local sif");
     std::fs::write(&remote_sqsh, "x").expect("remote");
 
     let with_forced_prepare = runtime_service(
@@ -437,7 +427,23 @@ fn runtime_cache_state_covers_prepare_and_local_paths() {
         }),
     );
     assert_eq!(
-        runtime_cache_state(&with_forced_prepare),
+        reuse_expectation(&with_forced_prepare).label(),
+        "rebuild on prepare"
+    );
+
+    let forced_with_missing_artifact = runtime_service(
+        ImageSource::Remote("docker://redis:7".into()),
+        tmpdir.path().join("forced-missing.sqsh"),
+        Some(PreparedImageSpec {
+            commands: vec!["echo hi".into()],
+            mounts: vec!["/host:/mnt".into()],
+            env: Vec::new(),
+            root: true,
+            force_rebuild: true,
+        }),
+    );
+    assert_eq!(
+        reuse_expectation(&forced_with_missing_artifact).label(),
         "rebuild on prepare"
     );
 
@@ -452,7 +458,7 @@ fn runtime_cache_state_covers_prepare_and_local_paths() {
             force_rebuild: false,
         }),
     );
-    assert_eq!(runtime_cache_state(&with_cached_prepare), "cache hit");
+    assert_eq!(reuse_expectation(&with_cached_prepare).label(), "cache hit");
 
     let missing_prepare = runtime_service(
         ImageSource::Remote("docker://redis:7".into()),
@@ -465,28 +471,80 @@ fn runtime_cache_state_covers_prepare_and_local_paths() {
             force_rebuild: false,
         }),
     );
-    assert_eq!(runtime_cache_state(&missing_prepare), "cache miss");
+    assert_eq!(reuse_expectation(&missing_prepare).label(), "cache miss");
+
+    let prepared_local_with_missing_source = runtime_service(
+        ImageSource::LocalSif(tmpdir.path().join("missing-source.sif")),
+        remote_sqsh.clone(),
+        Some(PreparedImageSpec {
+            commands: vec!["echo hi".into()],
+            mounts: Vec::new(),
+            env: Vec::new(),
+            root: true,
+            force_rebuild: false,
+        }),
+    );
+    assert_eq!(
+        reuse_expectation(&prepared_local_with_missing_source).label(),
+        "cache hit"
+    );
 
     let local_present = runtime_service(
         ImageSource::LocalSqsh(local_sqsh.clone()),
-        local_sqsh.clone(),
+        tmpdir.path().join("unused-runtime.sqsh"),
         None,
     );
-    assert_eq!(runtime_cache_state(&local_present), "local image present");
+    assert_eq!(
+        reuse_expectation(&local_present).label(),
+        "local image present"
+    );
 
     let local_missing = runtime_service(
         ImageSource::LocalSqsh(tmpdir.path().join("missing.sqsh")),
-        tmpdir.path().join("missing.sqsh"),
+        remote_sqsh.clone(),
         None,
     );
-    assert_eq!(runtime_cache_state(&local_missing), "local image missing");
+    assert_eq!(
+        reuse_expectation(&local_missing).label(),
+        "local image missing"
+    );
+
+    let local_sif_present = runtime_service(
+        ImageSource::LocalSif(local_sif),
+        tmpdir.path().join("unused-runtime.sif"),
+        None,
+    );
+    assert_eq!(
+        reuse_expectation(&local_sif_present).label(),
+        "local image present"
+    );
+
+    let local_sif_missing = runtime_service(
+        ImageSource::LocalSif(tmpdir.path().join("missing.sif")),
+        remote_sqsh.clone(),
+        None,
+    );
+    assert_eq!(
+        reuse_expectation(&local_sif_missing).label(),
+        "local image missing"
+    );
+
+    let remote_present = runtime_service(
+        ImageSource::Remote("docker://redis:7".into()),
+        remote_sqsh.clone(),
+        None,
+    );
+    assert_eq!(reuse_expectation(&remote_present).label(), "cache hit");
 
     let remote_missing = runtime_service(
         ImageSource::Remote("docker://redis:7".into()),
         tmpdir.path().join("missing-remote.sqsh"),
         None,
     );
-    assert_eq!(runtime_cache_state(&remote_missing), "cache miss");
+    assert_eq!(reuse_expectation(&remote_missing).label(), "cache miss");
+
+    let host = runtime_service(ImageSource::Host, remote_sqsh, None);
+    assert_eq!(reuse_expectation(&host).label(), "host runtime");
 }
 
 #[test]
@@ -516,17 +574,7 @@ fn service_names_collect_in_order() {
 }
 
 #[test]
-fn path_helpers_return_expected_locations() {
-    let path = PathBuf::from("/tmp/project/compose.yaml");
-    assert_eq!(
-        default_script_path(&path),
-        PathBuf::from("/tmp/project/hpc-compose.sbatch")
-    );
-    assert_eq!(
-        default_script_path(Path::new("compose.yaml")),
-        PathBuf::from("hpc-compose.sbatch")
-    );
-    assert!(default_cache_dir().ends_with(".cache/hpc-compose"));
+fn render_from_path_reports_the_missing_compose_file() {
     let err = render_from_path(Path::new("/definitely/missing/compose.yaml")).expect_err("missing");
     assert!(err.to_string().contains("/definitely/missing/compose.yaml"));
 }
@@ -557,13 +605,6 @@ fn print_helpers_cover_manifest_and_summary_paths() {
         revision: None,
         content_digest: None,
     };
-    let manifest_path = hpc_compose::cache::manifest_path_for(&runtime_image);
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_vec_pretty(&manifest).expect("manifest"),
-    )
-    .expect("write manifest");
-
     let service = runtime_service(
         ImageSource::Remote("docker://redis:7".into()),
         runtime_image.clone(),
@@ -592,6 +633,37 @@ fn print_helpers_cover_manifest_and_summary_paths() {
             local_sqsh,
             None,
         )],
+    };
+    let base_path = base_image_path_for_backend(&plan.cache_dir, &service, plan.runtime.backend);
+    let report = CacheInspectReport {
+        schema_version: OUTPUT_SCHEMA_VERSION,
+        cache_dir: plan.cache_dir.clone(),
+        services: vec![CacheInspectService {
+            service_name: service.name.clone(),
+            source_image: "docker://redis:7".into(),
+            base_registry: Some("registry-1.docker.io".into()),
+            base_artifact: Some(CacheArtifactInspect {
+                path: base_path.clone(),
+                artifact_present: false,
+                manifest_path: hpc_compose::cache::manifest_path_for(&base_path),
+                manifest: None,
+            }),
+            runtime_artifact: CacheArtifactInspect {
+                path: runtime_image.clone(),
+                artifact_present: true,
+                manifest_path: hpc_compose::cache::manifest_path_for(&runtime_image),
+                manifest: Some(manifest),
+            },
+            current_reuse_expectation: "rebuild on prepare".into(),
+            note: Some(
+                "this service rebuilds on prepare because prepare.mounts are present".into(),
+            ),
+        }],
+    };
+    let empty_report = CacheInspectReport {
+        schema_version: OUTPUT_SCHEMA_VERSION,
+        cache_dir: plan.cache_dir.clone(),
+        services: Vec::new(),
     };
 
     print_report(&Report { items: Vec::new() }, false);
@@ -622,14 +694,8 @@ fn print_helpers_cover_manifest_and_summary_paths() {
     });
     print_plan_inspect(&plan).expect("print plan inspect");
     print_plan_inspect(&local_plan).expect("print local plan inspect");
-    print_cache_inspect(&build_cache_inspect_report(&plan, None).expect("inspect report"))
-        .expect("inspect");
-    print_cache_inspect(
-        &build_cache_inspect_report(&plan, Some("other")).expect("inspect filtered report"),
-    )
-    .expect("inspect filtered");
-    print_manifest_block(&runtime_image).expect("manifest block");
-    print_manifest_block(&tmpdir.path().join("missing.sqsh")).expect("missing manifest block");
+    print_cache_inspect(&report).expect("inspect");
+    print_cache_inspect(&empty_report).expect("inspect filtered");
     print_prune_result(tmpdir.path(), &[]);
     print_prune_result(tmpdir.path(), std::slice::from_ref(&runtime_image));
     print_submit_details(&plan, Path::new("/tmp/job.sbatch"), "no job id").expect("submit details");
@@ -1259,62 +1325,38 @@ fn helper_functions_cover_remaining_formatting_paths() {
         }),
     );
     assert_eq!(
-        rebuild_reason(&service),
+        cache_rebuild_reason(&service).map(|reason| reason.label()),
         Some("runtime cache artifact is missing")
     );
     fs::write(&runtime_image, "x").expect("runtime");
-    assert_eq!(rebuild_reason(&service), None);
+    assert_eq!(cache_rebuild_reason(&service), None);
+
+    let unprepared = runtime_service(
+        ImageSource::Remote("docker://redis:7".into()),
+        tmpdir.path().join("unprepared-missing.sqsh"),
+        None,
+    );
+    assert_eq!(cache_rebuild_reason(&unprepared), None);
+
+    let forced = runtime_service(
+        ImageSource::Remote("docker://redis:7".into()),
+        tmpdir.path().join("forced-missing.sqsh"),
+        Some(PreparedImageSpec {
+            commands: vec!["echo hi".into()],
+            mounts: vec!["/host:/mnt".into()],
+            env: Vec::new(),
+            root: true,
+            force_rebuild: true,
+        }),
+    );
+    assert_eq!(
+        cache_rebuild_reason(&forced).map(|reason| reason.label()),
+        Some("prepare.mounts are present")
+    );
 }
 
 #[test]
-fn resolve_init_answers_and_cancel_job_cover_remaining_paths() {
-    let answers = resolve_init_answers(Some("dev-python-app".into()), None, None, || {
-        unreachable!("template path should not prompt")
-    })
-    .expect("template answers without cache dir");
-    assert_eq!(answers.cache_dir, None);
-
-    let answers = resolve_init_answers(
-        Some("dev-python-app".into()),
-        None,
-        Some("/cache".into()),
-        || unreachable!("template path should not prompt"),
-    )
-    .expect("template answers");
-    assert_eq!(answers.app_name, "dev-python-app");
-    assert_eq!(answers.cache_dir, Some("/cache".into()));
-
-    let err = resolve_init_answers(
-        Some("dev-python-app".into()),
-        None,
-        Some("   ".into()),
-        || unreachable!("template path should not prompt"),
-    )
-    .expect_err("blank cache dir");
-    assert!(err.to_string().contains("--cache-dir cannot be empty"));
-
-    let prompted =
-        resolve_init_answers(None, Some("override".into()), Some("/cache".into()), || {
-            Ok(hpc_compose::init::InitAnswers {
-                template_name: "app-redis-worker".into(),
-                app_name: "prompted".into(),
-                cache_dir: Some("/default".into()),
-            })
-        })
-        .expect("prompted");
-    assert_eq!(prompted.app_name, "override");
-    assert_eq!(prompted.cache_dir, Some("/cache".into()));
-
-    let err = resolve_init_answers(None, None, Some("   ".into()), || {
-        Ok(hpc_compose::init::InitAnswers {
-            template_name: "app-redis-worker".into(),
-            app_name: "prompted".into(),
-            cache_dir: Some("/default".into()),
-        })
-    })
-    .expect_err("blank prompted override");
-    assert!(err.to_string().contains("--cache-dir cannot be empty"));
-
+fn cancel_job_covers_remaining_paths() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let empty_fail = tmpdir.path().join("scancel-empty");
     write_script(&empty_fail, "#!/bin/bash\nset -euo pipefail\nexit 1\n");
@@ -1478,6 +1520,17 @@ fn stdout_entrypoints_cover_public_output_wrappers() {
         }],
         deep: None,
     };
+
+    let mut inventory_text = Vec::new();
+    write_job_inventory_scan(&mut inventory_text, &scan, true).expect("write inventory text");
+    let inventory_text = String::from_utf8(inventory_text).expect("inventory UTF-8");
+    assert!(inventory_text.contains(" size=2.0 KiB\n"));
+
+    let mut cleanup_text = Vec::new();
+    write_cleanup_report(&mut cleanup_text, &cleanup, true).expect("write cleanup text");
+    let cleanup_text = String::from_utf8(cleanup_text).expect("cleanup UTF-8");
+    assert!(cleanup_text.contains("total bytes reclaimed: 2.0 KiB\n"));
+    assert!(cleanup_text.contains(" size=2.0 KiB\n"));
 
     assert_eq!(
         resolve_stats_output_format(None, false),
@@ -2046,19 +2099,6 @@ fn score_confidence_label_covers_all_variants() {
 }
 
 #[test]
-fn format_bytes_scales_units_and_keeps_raw_byte_counts() {
-    assert_eq!(format_bytes(0), "0 B");
-    assert_eq!(format_bytes(512), "512 B");
-    assert_eq!(format_bytes(1023), "1023 B");
-    assert_eq!(format_bytes(1024), "1.0 KiB");
-    assert_eq!(format_bytes(1536), "1.5 KiB");
-    assert_eq!(format_bytes(1024 * 1024), "1.0 MiB");
-    assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB");
-    assert_eq!(format_bytes(1024u64.pow(4)), "1.0 TiB");
-    assert_eq!(format_bytes(2 * 1024u64.pow(4)), "2.0 TiB");
-}
-
-#[test]
 fn format_compact_elapsed_covers_each_duration_band() {
     assert_eq!(format_compact_elapsed(0), "0s");
     assert_eq!(format_compact_elapsed(59), "59s");
@@ -2113,22 +2153,171 @@ fn dot_escape_escapes_graphviz_special_characters() {
 }
 
 #[test]
-fn http_host_port_handles_scheme_defaults_ipv6_and_userinfo() {
-    assert_eq!(
-        http_host_port("http://node02:9000/health"),
-        ("node02".to_string(), 9000)
-    );
-    assert_eq!(http_host_port("https://x/"), ("x".to_string(), 443));
-    assert_eq!(http_host_port("http://y/"), ("y".to_string(), 80));
-    assert_eq!(
-        http_host_port("http://user:pass@host:1234/p"),
-        ("host".to_string(), 1234)
-    );
-    assert_eq!(
-        http_host_port("http://[::1]:8080/"),
-        ("::1".to_string(), 8080)
-    );
-    assert_eq!(http_host_port("garbage"), ("<host>".to_string(), 80));
+fn readiness_endpoint_preserves_exact_authority_parsing_contract() {
+    let cases = [
+        ("http://node02:9000/health", ("node02".to_string(), 9000)),
+        ("https://x/", ("x".to_string(), 443)),
+        ("http://y/", ("y".to_string(), 80)),
+        (
+            "https://user:pass@host.example:8443/p",
+            ("host.example".to_string(), 8443),
+        ),
+        (
+            "http://[2001:db8::7]:8080/",
+            ("2001:db8::7".to_string(), 8080),
+        ),
+        ("https://[2001:db8::7]/", ("2001:db8::7".to_string(), 443)),
+        ("garbage", ("<host>".to_string(), 80)),
+        ("https://[2001:db8::7", ("<host>".to_string(), 443)),
+    ];
+
+    for (url, expected) in cases {
+        let endpoint = crate::readiness_analysis::readiness_endpoint(&ReadinessSpec::Http {
+            url: url.to_string(),
+            status_code: 200,
+            timeout_seconds: None,
+        })
+        .expect("HTTP has an endpoint");
+        assert_eq!(
+            (endpoint.host, endpoint.port),
+            expected,
+            "authority case {url:?}"
+        );
+    }
+}
+
+#[test]
+fn readiness_http_authority_policies_preserve_their_intentional_distinctions() {
+    let cases = [
+        // Missing/empty authorities are classified as implicit-localhost, while
+        // endpoint presentation degrades to its host placeholder.
+        ("http:///health", true, ("<host>".to_string(), 80)),
+        ("http://user@/health", true, ("<host>".to_string(), 80)),
+        // Empty hosts are present-but-not-local to the locality classifier and
+        // remain empty in the descriptive endpoint.
+        ("http://:8080/health", false, (String::new(), 8080)),
+        ("http://[]:8081/health", false, (String::new(), 8081)),
+        // Bracket handling deliberately ignores trailing authority garbage in
+        // both policies, but endpoint presentation falls back to the default
+        // port when the bytes after `]` are not an immediate `:<port>`.
+        ("http://[::1]:8082/health", true, ("::1".to_string(), 8082)),
+        (
+            "http://[::1]trailing:8083/health",
+            true,
+            ("::1".to_string(), 80),
+        ),
+        ("http://[::1", true, ("<host>".to_string(), 80)),
+        // Invalid ports do not affect locality and fall back to the scheme's
+        // endpoint default.
+        (
+            "https://node.invalid:nope/health",
+            false,
+            ("node.invalid".to_string(), 443),
+        ),
+        // The endpoint scheme default is intentionally case-sensitive.
+        (
+            "HTTPS://secure.example/health",
+            false,
+            ("secure.example".to_string(), 80),
+        ),
+        // Both policies strip the final userinfo prefix before examining host.
+        (
+            "https://user:pass@localhost/health",
+            true,
+            ("localhost".to_string(), 443),
+        ),
+    ];
+
+    for (url, implicit_localhost, endpoint) in cases {
+        let readiness = ReadinessSpec::Http {
+            url: url.to_string(),
+            status_code: 200,
+            timeout_seconds: None,
+        };
+        assert_eq!(
+            crate::readiness_util::readiness_uses_implicit_localhost(Some(&readiness)),
+            implicit_localhost,
+            "locality case {url:?}"
+        );
+        let derived = crate::readiness_analysis::readiness_endpoint(&readiness)
+            .expect("HTTP has an endpoint");
+        assert_eq!(
+            (derived.host, derived.port),
+            endpoint,
+            "endpoint case {url:?}"
+        );
+    }
+}
+
+#[test]
+fn submit_endpoints_preserve_service_order_variants_and_original_url_bytes() {
+    let service = |name: &str, readiness: Option<ReadinessSpec>| {
+        let mut service = runtime_service(
+            ImageSource::Remote("docker://example.invalid/image:tag".into()),
+            PathBuf::from("/cache/image.sqsh"),
+            None,
+        );
+        service.name = name.to_string();
+        service.readiness = readiness;
+        service
+    };
+    let original_url = "HTTPS://user:pass@[2001:db8::7]:nope/health?x=%2F";
+    let plan = RuntimePlan {
+        name: "readiness-endpoints".into(),
+        cache_dir: PathBuf::from("/cache"),
+        runtime: hpc_compose::spec::RuntimeConfig::default(),
+        slurm: SlurmConfig::default(),
+        ordered_services: vec![
+            service("sleep", Some(ReadinessSpec::Sleep { seconds: 1 })),
+            service(
+                "tcp-implicit",
+                Some(ReadinessSpec::Tcp {
+                    host: None,
+                    port: 7001,
+                    timeout_seconds: Some(2),
+                }),
+            ),
+            service(
+                "log",
+                Some(ReadinessSpec::Log {
+                    pattern: "ready".into(),
+                    timeout_seconds: None,
+                }),
+            ),
+            service(
+                "http-original",
+                Some(ReadinessSpec::Http {
+                    url: original_url.into(),
+                    status_code: 204,
+                    timeout_seconds: Some(3),
+                }),
+            ),
+            service(
+                "tcp-explicit",
+                Some(ReadinessSpec::Tcp {
+                    host: Some("node02".into()),
+                    port: 7002,
+                    timeout_seconds: None,
+                }),
+            ),
+            service("none", None),
+        ],
+    };
+
+    let endpoints = build_submit_endpoints(&plan);
+    assert_eq!(endpoints.len(), 3, "Sleep, Log, and None are excluded");
+    assert_eq!(endpoints[0].service, "tcp-implicit");
+    assert_eq!(endpoints[0].host, "<host>");
+    assert_eq!(endpoints[0].port, 7001);
+    assert_eq!(endpoints[0].url, None);
+    assert_eq!(endpoints[1].service, "http-original");
+    assert_eq!(endpoints[1].host, "2001:db8::7");
+    assert_eq!(endpoints[1].port, 80);
+    assert_eq!(endpoints[1].url.as_deref(), Some(original_url));
+    assert_eq!(endpoints[2].service, "tcp-explicit");
+    assert_eq!(endpoints[2].host, "node02");
+    assert_eq!(endpoints[2].port, 7002);
+    assert_eq!(endpoints[2].url, None);
 }
 
 #[test]
@@ -2230,4 +2419,38 @@ fn spec_next_commands_preserve_the_checked_compose_file() {
             "hpc-compose up".to_string(),
         ]
     );
+}
+
+#[test]
+fn display_shell_quote_and_exact_spec_hints_preserve_conditional_quoting() {
+    assert_eq!(
+        quote_if_needed_for_display("safe-token_1/path.yaml"),
+        "safe-token_1/path.yaml"
+    );
+    assert_eq!(quote_if_needed_for_display("two words"), "'two words'");
+    assert_eq!(quote_if_needed_for_display("demo'spec"), "'demo'\\''spec'");
+    assert_eq!(quote_if_needed_for_display("job:17"), "job:17");
+    assert_eq!(quote_if_needed_for_display(""), "");
+
+    let file = Path::new("/tmp/team dir/demo'spec.yaml");
+    assert_eq!(
+        validate_next_commands(Some(file)),
+        vec![
+            "hpc-compose plan -f '/tmp/team dir/demo'\\''spec.yaml'".to_string(),
+            "hpc-compose preflight -f '/tmp/team dir/demo'\\''spec.yaml'".to_string(),
+            "hpc-compose up -f '/tmp/team dir/demo'\\''spec.yaml'".to_string(),
+        ]
+    );
+    assert_eq!(
+        ready_to_run_next_commands(Some(file)),
+        vec!["hpc-compose up -f '/tmp/team dir/demo'\\''spec.yaml'".to_string()]
+    );
+}
+
+#[test]
+fn command_argument_quoting_preserves_its_allowlist_and_empty_contract() {
+    assert_eq!(shell_quote_arg(""), "");
+    assert_eq!(shell_quote_arg("key=value,next"), "key=value,next");
+    assert_eq!(shell_quote_arg("two words"), "'two words'");
+    assert_eq!(shell_quote_arg("it's"), "'it'\\''s'");
 }

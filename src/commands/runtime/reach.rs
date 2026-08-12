@@ -10,29 +10,14 @@ use anyhow::{Context, Result, bail};
 use hpc_compose::cli::OutputFormat;
 use hpc_compose::context::ResolvedContext;
 use hpc_compose::job::{SchedulerOptions, build_status_snapshot};
-use serde::Serialize;
 
 use super::exec::current_hostname;
 use super::ssh_hint::{CONTROL_MASTER_SSH_OPTS, OTP_MULTIPLEX_NOTE, ssh_forward_command};
 use super::{resolve_tracked_record, tracked_job_hint};
 use crate::commands::load;
+pub(crate) use crate::output::runtime::ReachOutput;
+use crate::readiness_analysis::readiness_endpoint;
 use crate::{output, term};
-
-/// Machine-readable output for `reach --format json`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct ReachOutput {
-    pub(crate) schema_version: u32,
-    service: String,
-    job_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    compute_node: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    login_host: Option<String>,
-    local_port: u16,
-    remote_port: u16,
-    url: String,
-    ssh_command: String,
-}
 
 pub(crate) fn reach(
     context: ResolvedContext,
@@ -77,9 +62,11 @@ pub(crate) fn reach(
 
     // Remote port + URL: an explicit --port wins; otherwise reuse the
     // readiness-derived endpoint (TCP/HTTP only). Sleep/Log services need --port.
-    let endpoint = output::build_submit_endpoints(&plan)
-        .into_iter()
-        .find(|endpoint| endpoint.service == service);
+    let endpoint = plan
+        .ordered_services
+        .iter()
+        .filter(|candidate| candidate.name == service)
+        .find_map(|candidate| candidate.readiness.as_ref().and_then(readiness_endpoint));
     let (remote_port, url) = match (port, endpoint) {
         (Some(port), _) => (port, format!("http://127.0.0.1:{port}")),
         (None, Some(endpoint)) => {
@@ -189,4 +176,37 @@ fn run_reach_forward(
         bail!("ssh exited abnormally");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReachOutput;
+
+    #[test]
+    fn reach_output_preserves_exact_pretty_json_bytes() {
+        let output = ReachOutput {
+            schema_version: 1,
+            service: "api".to_string(),
+            job_id: "42".to_string(),
+            compute_node: None,
+            login_host: None,
+            local_port: 8000,
+            remote_port: 8000,
+            url: "http://127.0.0.1:8000".to_string(),
+            ssh_command: "ssh -L fixture".to_string(),
+        };
+
+        let actual = crate::output::to_pretty_json(&output).expect("serialize reach fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "service": "api",
+  "job_id": "42",
+  "local_port": 8000,
+  "remote_port": 8000,
+  "url": "http://127.0.0.1:8000",
+  "ssh_command": "ssh -L fixture"
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+    }
 }

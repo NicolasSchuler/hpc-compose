@@ -2,5 +2,5 @@
 
 pub(crate) use super::{
     CacheArtifactInspect, CacheInspectReport, CacheInspectService, CachePruneReport,
-    build_cache_inspect_report, print_cache_inspect, print_prune_result,
+    print_cache_inspect, print_prune_result, source_image_display,
 };

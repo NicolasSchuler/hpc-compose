@@ -15,9 +15,9 @@ use hpc_compose::planner::{ServicePlacementMode, build_plan};
 use hpc_compose::runtime_plan::build_runtime_plan;
 use hpc_compose::spec::ComposeSpec;
 use hpc_compose::term;
-use serde::Serialize;
 
 use crate::output::common as output_common;
+pub(crate) use crate::output::{LessonDescriptionOutput, LessonListOutput, StepDescriptionOutput};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn command(
@@ -394,31 +394,6 @@ fn placement_mode_label(mode: ServicePlacementMode) -> &'static str {
     }
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct LessonListOutput {
-    pub(crate) schema_version: u32,
-    lessons: Vec<LessonDescriptionOutput>,
-}
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct LessonDescriptionOutput {
-    pub(crate) schema_version: u32,
-    id: String,
-    title: String,
-    description: String,
-    step_count: usize,
-    steps: Vec<StepDescriptionOutput>,
-}
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-struct StepDescriptionOutput {
-    id: String,
-    title: String,
-    summary: String,
-    concepts: Vec<String>,
-    source_templates: Vec<String>,
-}
-
 fn print_lesson_list(format: Option<OutputFormat>) -> Result<()> {
     match output_common::resolve_output_format(format) {
         OutputFormat::Text => {
@@ -515,6 +490,80 @@ fn describe_lesson_output(lesson: &EvolveLesson) -> LessonDescriptionOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lesson_description_fixture() -> LessonDescriptionOutput {
+        LessonDescriptionOutput {
+            schema_version: 1,
+            id: "minimal".to_string(),
+            title: "Minimal app".to_string(),
+            description: "One service".to_string(),
+            step_count: 1,
+            steps: vec![StepDescriptionOutput {
+                id: "service".to_string(),
+                title: "Add service".to_string(),
+                summary: "Adds one service".to_string(),
+                concepts: vec!["services".to_string()],
+                source_templates: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn lesson_outputs_preserve_exact_pretty_json_bytes() {
+        let list = LessonListOutput {
+            schema_version: 1,
+            lessons: vec![lesson_description_fixture()],
+        };
+        let actual = crate::output::to_pretty_json(&list).expect("serialize lesson list fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "lessons": [
+    {
+      "schema_version": 1,
+      "id": "minimal",
+      "title": "Minimal app",
+      "description": "One service",
+      "step_count": 1,
+      "steps": [
+        {
+          "id": "service",
+          "title": "Add service",
+          "summary": "Adds one service",
+          "concepts": [
+            "services"
+          ],
+          "source_templates": []
+        }
+      ]
+    }
+  ]
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+
+        let description = lesson_description_fixture();
+        let actual = crate::output::to_pretty_json(&description).expect("serialize lesson fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "id": "minimal",
+  "title": "Minimal app",
+  "description": "One service",
+  "step_count": 1,
+  "steps": [
+    {
+      "id": "service",
+      "title": "Add service",
+      "summary": "Adds one service",
+      "concepts": [
+        "services"
+      ],
+      "source_templates": []
+    }
+  ]
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+    }
 
     #[test]
     fn validation_temp_file_is_removed_on_success_and_failure() {

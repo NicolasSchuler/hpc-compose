@@ -201,6 +201,146 @@ fn state_file_text(root: &Path) -> String {
 }
 
 #[test]
+fn workspace_offline_rejection_precedes_context_and_tool_invocation() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let fixture = write_ws_tools(tmpdir.path());
+    let missing_settings = tmpdir.path().join("missing-settings.toml");
+    let tool_call_sentinel = tmpdir.path().join("tool-call-sentinel");
+    fs::write(&tool_call_sentinel, "untouched\n").expect("sentinel");
+
+    for tool in [
+        &fixture.find,
+        &fixture.allocate,
+        &fixture.extend,
+        &fixture.release,
+        &fixture.list,
+    ] {
+        write_script(
+            tool,
+            &format!(
+                "#!/bin/bash\nprintf 'called\\n' >> \"{}\"\nexit 99\n",
+                tool_call_sentinel.display()
+            ),
+        );
+    }
+
+    let mut args = vec![
+        "--offline".to_string(),
+        "--settings-file".to_string(),
+        missing_settings.display().to_string(),
+        "--profile".to_string(),
+        "missing-profile".to_string(),
+        "workspace".to_string(),
+        "status".to_string(),
+    ];
+    args.extend(fixture.tool_args());
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = run_cli(tmpdir.path(), &refs);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        stderr_text(&output),
+        concat!(
+            "hpc_compose::error\n",
+            "\n",
+            "  × --offline forbids workspace tool calls; use static authoring commands such\n",
+            "  │ as validate, plan, render, inspect, or an explicit dry-run preview\n",
+            "\n",
+        )
+    );
+    assert!(!missing_settings.exists());
+    assert_eq!(
+        fs::read(&tool_call_sentinel).expect("sentinel after rejection"),
+        b"untouched\n",
+        "offline rejection must happen before any workspace tool invocation"
+    );
+}
+
+#[test]
+fn workspace_status_custom_settings_profile_propagates_exact_json_context() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let fixture = write_ws_tools(tmpdir.path());
+    let profile = "router-profile";
+    let workspace_name = "router-workspace";
+    let settings_dir = tmpdir.path().join("custom-config");
+    let settings_path = settings_dir.join("site-settings.toml");
+    let state_path = settings_dir.join("workspace-state.toml");
+    fs::create_dir_all(&settings_dir).expect("settings dir");
+    fs::write(
+        &settings_path,
+        format!(
+            "version = 1\n\n[profiles.{profile}.workspace]\nname = \"{workspace_name}\"\nduration_days = 9\n"
+        ),
+    )
+    .expect("custom settings");
+    let workspace_path = fixture.workspace_dir(workspace_name);
+    fs::create_dir_all(&workspace_path).expect("profile workspace");
+    write_script(
+        &fixture.list,
+        &format!("#!/bin/bash\nset -euo pipefail\necho 'id: {workspace_name}'\n"),
+    );
+
+    let mut args = vec![
+        "--settings-file".to_string(),
+        settings_path.display().to_string(),
+        "--profile".to_string(),
+        profile.to_string(),
+        "workspace".to_string(),
+        "status".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ];
+    args.extend(fixture.tool_args());
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = run_cli(tmpdir.path(), &refs);
+
+    assert_success(&output);
+    assert!(output.stderr.is_empty());
+    let workspace_path_json =
+        serde_json::to_string(&workspace_path.display().to_string()).expect("workspace path JSON");
+    let state_path_json =
+        serde_json::to_string(&state_path.display().to_string()).expect("state path JSON");
+    let expected = format!(
+        concat!(
+            "{{\n",
+            "  \"schema_version\": 1,\n",
+            "  \"profile\": \"router-profile\",\n",
+            "  \"name\": \"router-workspace\",\n",
+            "  \"exists\": true,\n",
+            "  \"path\": {workspace_path_json},\n",
+            "  \"expiry_epoch\": null,\n",
+            "  \"remaining_display\": null,\n",
+            "  \"expiry_display\": null,\n",
+            "  \"extensions_remaining\": null,\n",
+            "  \"state_path\": {state_path_json}\n",
+            "}}\n",
+        ),
+        workspace_path_json = workspace_path_json,
+        state_path_json = state_path_json,
+    );
+    assert_eq!(stdout_text(&output), expected);
+    assert!(state_path.is_file(), "status must persist beside settings");
+    assert!(
+        !tmpdir
+            .path()
+            .join(".hpc-compose/workspace-state.toml")
+            .exists(),
+        "explicit settings must not write state under the cwd fallback"
+    );
+    let state = fs::read_to_string(&state_path).expect("profile state");
+    assert!(state.contains("[profiles.router-profile]"), "got: {state}");
+    assert!(
+        state.contains(&format!("name = \"{workspace_name}\"")),
+        "got: {state}"
+    );
+    assert!(
+        state.contains(&format!("path = \"{}\"", workspace_path.display())),
+        "got: {state}"
+    );
+}
+
+#[test]
 fn workspace_status_reports_existing_workspace_text_and_json() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     write_workspace_settings(tmpdir.path());

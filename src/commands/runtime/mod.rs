@@ -10,7 +10,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{HoldOnExit, OutputFormat, WatchMode};
-use hpc_compose::cluster::{discover_cluster_profile_path, load_cluster_profile};
 use hpc_compose::context::ResolvedContext;
 #[cfg(test)]
 use hpc_compose::job::build_submission_record_with_backend;
@@ -28,22 +27,25 @@ use hpc_compose::planner::{ImageSource, ServicePlacementMode};
 use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
 use hpc_compose::prepare::{PrepareOptions, prepare_runtime_plan_with_reporter};
 use hpc_compose::render::{
-    LocalRenderOptions, RenderOptions, log_file_name_for_service, render_local_script_with_options,
-    render_script_with_options,
+    LocalRenderOptions, RenderOptions, render_local_script_with_options, render_script_with_options,
 };
 use hpc_compose::runtime_plan::{RuntimePlan, base_image_path_for_backend};
 use hpc_compose::spec::{
     MetricsCollector, MetricsConfig, ServiceFailureMode, SignalShellTarget, parse_slurm_time_limit,
 };
-use hpc_compose::when::{
-    MonitorOptions, RealMonitorRuntime, WhenConditionSummary, WhenConditions, monitor_until_ready,
-};
+use hpc_compose::when::{MonitorOptions, RealMonitorRuntime, WhenConditions, monitor_until_ready};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::commands::load;
+use crate::domain::{extract_human_sbatch_job_id, service_step_name, service_token};
 use crate::output;
+pub(crate) use crate::output::runtime::WhenSubmitOutput;
 use crate::progress::{PrepareProgress, ProgressReporter};
+use crate::tracked_paths::{
+    ALLOCATION_DIR_NAME, LEGACY_ACTIVE_ALLOCATION_NODELIST_FILE_NAME, METADATA_DIR_NAME,
+    log_file_name_for_service,
+};
 use crate::watch_ui;
 
 pub(crate) mod notebook;
@@ -83,7 +85,6 @@ pub(crate) use lifecycle::*;
 pub(crate) use pull::*;
 pub(crate) use reach::*;
 pub(crate) use remote::*;
-pub(crate) use rendezvous_cmd::*;
 pub(crate) use sweep::*;
 
 /// Bundle of the four preparation-related flags shared across the runtime
@@ -232,12 +233,21 @@ fn latest_record_path(record: &SubmissionRecord) -> PathBuf {
     }
 }
 
+fn cancel_job_with_text_output(job_id: &str, scancel_bin: &str) -> Result<()> {
+    let stdout = crate::job::cancel_job(job_id, scancel_bin)?;
+    if !stdout.is_empty() {
+        println!("{stdout}");
+    }
+    println!("cancelled job: {job_id}");
+    Ok(())
+}
+
 fn default_run_script_path(compose_file: &Path, service_name: &str) -> PathBuf {
     let parent = compose_file.parent().unwrap_or_else(|| Path::new("."));
-    let service_token = log_file_name_for_service(service_name)
-        .trim_end_matches(".log")
-        .to_string();
-    parent.join(format!("hpc-compose-run-{service_token}.sbatch"))
+    parent.join(format!(
+        "hpc-compose-run-{}.sbatch",
+        service_token(service_name)
+    ))
 }
 
 fn default_ephemeral_run_script_path(cwd: &Path, local: bool) -> PathBuf {
@@ -277,7 +287,7 @@ pub(crate) fn collect_submit_provenance(
     cwd: &Path,
     plan: &RuntimePlan,
 ) -> Option<hpc_compose::job::JobProvenance> {
-    let repo_root = hpc_compose::context::repo_root_or_cwd(cwd);
+    let repo_root = crate::path_util::repo_root_or_cwd(cwd);
     let provenance = hpc_compose::job::collect_provenance(
         &repo_root,
         env!("CARGO_PKG_VERSION"),
@@ -599,7 +609,7 @@ fn sh_quote(value: &str) -> String {
     {
         value.to_string()
     } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
+        crate::shell_quote::quote_always_with_backslash_apostrophe(value)
     }
 }
 
@@ -623,9 +633,9 @@ fn allocation_bootstrap_script(
 submit_dir={submit_dir}
 cd "$submit_dir"
 job_id="${{SLURM_JOB_ID:?SLURM_JOB_ID is required inside salloc}}"
-allocation_dir="$submit_dir/.hpc-compose/$job_id/allocation"
+allocation_dir="$submit_dir/{metadata_dir_name}/$job_id/{allocation_dir_name}"
 mkdir -p "$allocation_dir"
-nodelist_file="$allocation_dir/nodelist"
+nodelist_file="$allocation_dir/{legacy_active_allocation_nodelist_file_name}"
 raw_nodelist="${{SLURM_JOB_NODELIST:-${{SLURM_NODELIST:-}}}}"
 if [ -n "$raw_nodelist" ] && {scontrol} show hostnames "$raw_nodelist" > "$nodelist_file" 2>/dev/null; then
   :
@@ -663,6 +673,9 @@ exec "${{SHELL:-/bin/bash}}" -l
         cache_dir = sh_quote(&cache_dir),
         project_dir = sh_quote(&project_dir),
         runtime_backend = sh_quote(runtime_plan.runtime.backend.as_str()),
+        metadata_dir_name = METADATA_DIR_NAME,
+        allocation_dir_name = ALLOCATION_DIR_NAME,
+        legacy_active_allocation_nodelist_file_name = LEGACY_ACTIVE_ALLOCATION_NODELIST_FILE_NAME,
     )
 }
 
@@ -823,10 +836,7 @@ fn load_discovered_cluster_profile(
         .value
         .parent()
         .unwrap_or_else(|| Path::new("."));
-    let Some(path) = discover_cluster_profile_path(start) else {
-        return Ok(None);
-    };
-    Ok(Some(load_cluster_profile(&path)?))
+    hpc_compose::cluster::load_discovered_cluster_profile(start)
 }
 
 fn purge_cached_artifacts(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
@@ -978,18 +988,6 @@ fn local_placement_mode_label(mode: ServicePlacementMode) -> &'static str {
     }
 }
 
-fn local_service_step_name(value: &str) -> String {
-    let mut token = String::new();
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() {
-            token.push(byte as char);
-        } else {
-            token.push_str(&format!("_x{byte:02x}_"));
-        }
-    }
-    format!("hpc-compose:{token}")
-}
-
 fn write_local_runtime_state_stub(
     record: &SubmissionRecord,
     plan: &RuntimePlan,
@@ -1015,7 +1013,7 @@ fn write_local_runtime_state_stub(
         .map(|(index, service)| {
             serde_json::json!({
                 "service_name": service.name,
-                "step_name": local_service_step_name(&service.name),
+                "step_name": service_step_name(&service.name),
                 "log_path": record
                     .service_logs
                     .get(&service.name)
@@ -1224,7 +1222,7 @@ where
             &context.resource_profiles,
         )?;
     let effective_config_yaml =
-        output::effective_config_yaml(&effective_config, &context.secret_values())?;
+        crate::job::effective_config_snapshot_yaml(&effective_config, &context.secret_values())?;
     let runtime_plan =
         load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -1317,7 +1315,8 @@ where
             &local_render_options(context, &runtime_plan, dev_reload),
         )
     })?;
-    let script_path = script_out.unwrap_or_else(|| output::default_local_script_path(&file));
+    let script_path =
+        script_out.unwrap_or_else(|| crate::path_util::default_local_script_path(&file));
     crate::secure_io::write(&script_path, script, true).with_context(|| {
         format!(
             "failed to write rendered script to {}",
@@ -1497,7 +1496,7 @@ fn submit_prepared_slurm_submission(
     let stdout = String::from_utf8_lossy(&output_result.stdout)
         .trim_end()
         .to_string();
-    let tracked_submission = if let Some(job_id) = output::extract_job_id(&stdout) {
+    let tracked_submission = if let Some(job_id) = extract_human_sbatch_job_id(&stdout) {
         let record = build_submission_record_with_options(
             &prepared.file,
             &prepared.submit_dir,
@@ -1661,7 +1660,7 @@ where
             &context.resource_profiles,
         )?;
     let effective_config_yaml =
-        output::effective_config_yaml(&effective_config, &context.secret_values())?;
+        crate::job::effective_config_snapshot_yaml(&effective_config, &context.secret_values())?;
     let mut runtime_plan =
         load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -1775,7 +1774,7 @@ where
             },
         )
     })?;
-    let script_path = script_out.unwrap_or_else(|| output::default_script_path(&file));
+    let script_path = script_out.unwrap_or_else(|| crate::path_util::default_script_path(&file));
     crate::secure_io::write(&script_path, script, true).with_context(|| {
         format!(
             "failed to write rendered script to {}",
@@ -1807,18 +1806,6 @@ fn validate_when_plan_conditions(plan: &RuntimePlan, conditions: &WhenConditions
         }
     }
     Ok(())
-}
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct WhenSubmitOutput<'a> {
-    pub(crate) schema_version: u32,
-    triggered: bool,
-    // `WhenConditionSummary` (in `hpc_compose::when`) does not derive `JsonSchema`
-    // and is outside this task's editable scope, so describe the array as
-    // permissive JSON values in the published schema. Serde output is unchanged.
-    #[schemars(with = "Vec<serde_json::Value>")]
-    conditions: &'a [WhenConditionSummary],
-    submission: &'a output::SubmitOutput,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1966,7 +1953,7 @@ pub(crate) fn launch(
             &context.resource_profiles,
         )?;
     let effective_config_yaml =
-        output::effective_config_yaml(&effective_config, &context.secret_values())?;
+        crate::job::effective_config_snapshot_yaml(&effective_config, &context.secret_values())?;
     let mut runtime_plan =
         load::load_runtime_plan_with_interpolation_vars_cache_default_and_resource_profiles(
             &context.compose_file.value,
@@ -2112,9 +2099,9 @@ pub(crate) fn launch(
     })?;
     let script_path = script_out.unwrap_or_else(|| {
         if local {
-            output::default_local_script_path(&file)
+            crate::path_util::default_local_script_path(&file)
         } else {
-            output::default_script_path(&file)
+            crate::path_util::default_script_path(&file)
         }
     });
     crate::secure_io::write(&script_path, script, true).with_context(|| {
@@ -2723,7 +2710,7 @@ fn smoke_test_via_dev_cluster(
     quiet: bool,
 ) -> Result<()> {
     let checkout_root = find_dev_cluster_checkout(&context.cwd)?;
-    let project_dir = hpc_compose::context::repo_root_or_cwd(&context.cwd);
+    let project_dir = crate::path_util::repo_root_or_cwd(&context.cwd);
     let compose_file =
         dev_cluster_container_path(&project_dir, &context.compose_file.value, "compose file")?;
     let script_out = script_out

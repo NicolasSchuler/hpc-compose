@@ -23,10 +23,11 @@ use hpc_compose::context::ResolvedContext;
 
 use super::MetricsOverrides;
 use super::ssh_hint::{CONTROL_MASTER_SSH_OPTS, NONINTERACTIVE_SSH_OPTS, OTP_MULTIPLEX_NOTE};
+use crate::domain::extract_human_sbatch_job_id;
 use crate::exit::ExitCodeError;
+use crate::path_util::repo_root_or_cwd;
 use crate::shell_quote;
 use crate::term;
-use hpc_compose::context::repo_root_or_cwd;
 
 /// Optional env var of extra ssh options (whitespace-split) appended to every
 /// ssh/rsync connection for this run — e.g. `-p 2222 -i ~/.ssh/cluster` for a
@@ -375,7 +376,7 @@ fn run_delegate_capturing_job_id(
         for line in BufReader::new(stdout).lines() {
             let line = line.context("failed to read delegated hpc-compose output")?;
             if job_id.is_none() {
-                job_id = extract_job_id(&line);
+                job_id = extract_human_sbatch_job_id(&line).map(str::to_owned);
             }
             let _ = writeln!(sink, "{line}");
             let _ = sink.flush();
@@ -627,16 +628,6 @@ pub(crate) fn build_base_ssh_args(extra_opts: &[String]) -> Vec<String> {
 /// delegating to a login node running the published release of the same version.
 fn local_build_is_unreleased() -> bool {
     option_env!("HPC_COMPOSE_BUILD_DIRTY") == Some("1")
-}
-
-/// Extracts the Slurm job id from a delegated-`up` output line such as
-/// `Submitted batch job 1653779`, so the remote follow-up hints can be
-/// copy-pasteable instead of carrying a `<job-id>` placeholder.
-fn extract_job_id(line: &str) -> Option<String> {
-    const MARKER: &str = "Submitted batch job ";
-    let rest = &line[line.find(MARKER)? + MARKER.len()..];
-    let id: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    (!id.is_empty()).then_some(id)
 }
 
 /// Applies an SSH username to a bare destination. A destination that already
@@ -1817,18 +1808,26 @@ mod tests {
         assert!(placeholder.contains("--job-id <job-id>"));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn extract_job_id_parses_slurm_submit_line() {
-        assert_eq!(
-            extract_job_id("Submitted batch job 1653779").as_deref(),
-            Some("1653779")
-        );
-        assert_eq!(
-            extract_job_id("  Submitted batch job 42 (cluster)").as_deref(),
-            Some("42")
-        );
-        assert_eq!(extract_job_id("preparing artifacts"), None);
-        assert_eq!(extract_job_id("Submitted batch job "), None);
+    fn delegated_output_captures_owned_job_id_from_first_valid_line() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let fake_ssh = tmpdir.path().join("fake-ssh");
+        fs::write(
+            &fake_ssh,
+            "#!/bin/sh\nprintf '%s\\n' 'Submitted batch job nope' 'Submitted batch job 1653779 (cluster)' 'Submitted batch job 42'\n",
+        )
+        .expect("write fake ssh");
+        fs::set_permissions(&fake_ssh, fs::Permissions::from_mode(0o755)).expect("chmod fake ssh");
+
+        let (status, job_id) =
+            run_delegate_capturing_job_id(fake_ssh.to_str().expect("fake ssh path"), &[])
+                .expect("capture delegated output");
+
+        assert!(status.success());
+        assert_eq!(job_id.as_deref(), Some("1653779"));
     }
 
     #[test]

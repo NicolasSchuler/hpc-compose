@@ -15,26 +15,10 @@ use hpc_compose::job::{
     ArtifactManifest, artifact_manifest_path_for_record, artifact_payload_dir_for_record,
     load_submission_record,
 };
-use serde::Serialize;
 
 use super::ssh_hint::{OTP_MULTIPLEX_NOTE, control_master_opts_str};
+pub(crate) use crate::output::runtime::PullOutput;
 use crate::{output, term};
-
-/// Machine-readable output for `pull --format json`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct PullOutput {
-    pub(crate) schema_version: u32,
-    job_id: String,
-    bundles: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    login_host: Option<String>,
-    cluster_path: String,
-    into: String,
-    files: usize,
-    bytes: u64,
-    suggested_command: String,
-    ssh_multiplex_hint: String,
-}
 
 /// Build the cluster-side path label and the rsync command `pull` suggests.
 /// Factored out so the ControlMaster opts (one OTP per session) and the
@@ -171,6 +155,37 @@ pub(crate) fn pull(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_output_preserves_exact_pretty_json_bytes() {
+        let output = PullOutput {
+            schema_version: 1,
+            job_id: "42".to_string(),
+            bundles: Vec::new(),
+            login_host: None,
+            cluster_path: "<login-node>:/cache/payload".to_string(),
+            into: "results".to_string(),
+            files: 0,
+            bytes: 0,
+            suggested_command: "rsync fixture".to_string(),
+            ssh_multiplex_hint: String::new(),
+        };
+
+        let actual = crate::output::to_pretty_json(&output).expect("serialize pull fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "job_id": "42",
+  "bundles": [],
+  "cluster_path": "<login-node>:/cache/payload",
+  "into": "results",
+  "files": 0,
+  "bytes": 0,
+  "suggested_command": "rsync fixture",
+  "ssh_multiplex_hint": ""
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+    }
 
     #[test]
     fn pull_rsync_command_carries_controlmaster_opts_and_otp_note_surface() {

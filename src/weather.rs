@@ -266,16 +266,6 @@ pub fn collect_weather(options: &WeatherOptions<'_>) -> Result<WeatherReport> {
     })
 }
 
-/// Public-ish convenience wrapper around [`parse_sinfo`] returning the parsed
-/// nodes and maintenance notes as a tuple. Currently exercised only by tests
-/// (the production weather flow calls [`parse_sinfo`] directly), but kept
-/// available for future internal callers and external integration tests.
-#[allow(dead_code)]
-pub fn parse_sinfo_nodes(raw: &str) -> (NodeSummary, Vec<MaintenanceNote>) {
-    let parsed = parse_sinfo(raw);
-    (parsed.nodes, parsed.maintenance)
-}
-
 fn parse_sinfo(raw: &str) -> ParsedSinfo {
     let mut parsed = ParsedSinfo::default();
     let mut models: BTreeMap<String, GpuModelAccumulator> = BTreeMap::new();
@@ -707,6 +697,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn malformed_profile_warns_exactly_and_keeps_environment_fallback() {
+        let _env_guard = crate::test_support::env_lock().lock().expect("env lock");
+        let previous_cluster_name = env::var_os("SLURM_CLUSTER_NAME");
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let profile_path = tmpdir
+            .path()
+            .join(crate::cluster::CLUSTER_PROFILE_RELATIVE_PATH);
+        std::fs::create_dir_all(profile_path.parent().expect("profile parent"))
+            .expect("create profile parent");
+        std::fs::write(&profile_path, "schema_version = [\n").expect("write malformed profile");
+        unsafe {
+            env::set_var("SLURM_CLUSTER_NAME", "fallback-cluster");
+        }
+
+        let mut warnings = Vec::new();
+        let profile = load_discovered_cluster_profile(tmpdir.path(), &mut warnings);
+        let cluster = profile
+            .as_ref()
+            .and_then(cluster_label_from_profile)
+            .or_else(cluster_label_from_env);
+
+        match previous_cluster_name {
+            Some(value) => unsafe { env::set_var("SLURM_CLUSTER_NAME", value) },
+            None => unsafe { env::remove_var("SLURM_CLUSTER_NAME") },
+        }
+
+        assert!(profile.is_none());
+        assert_eq!(cluster.as_deref(), Some("fallback-cluster"));
+        assert_eq!(
+            warnings,
+            vec![format!(
+                "failed to load cluster profile {}: failed to parse cluster profile {}",
+                profile_path.display(),
+                profile_path.display()
+            )]
+        );
+    }
+
+    #[test]
     fn sinfo_parser_counts_grouped_cpu_gpu_and_unavailable_rows() {
         let raw = "\
 gpu*|idle|2|gpu:a100:4|none
@@ -715,21 +744,24 @@ gpu|down|1|gpu:h100:8|maintenance Tue
 cpu|idle|5|N/A|
 cpu|drain|2|(null)|hardware
 ";
-        let (nodes, maintenance) = parse_sinfo_nodes(raw);
-        assert_eq!(nodes.total_nodes, 13);
-        assert_eq!(nodes.free_nodes, 7);
-        assert_eq!(nodes.unavailable_nodes, 3);
-        assert_eq!(nodes.gpu.total_nodes, 6);
-        assert_eq!(nodes.gpu.free_nodes, 2);
-        assert_eq!(nodes.gpu.total_devices, 28);
-        assert_eq!(nodes.gpu.free_devices, 8);
-        assert_eq!(nodes.cpu.total_nodes, 7);
-        assert_eq!(nodes.cpu.free_nodes, 5);
-        assert_eq!(nodes.gpu.models[0].model, "a100");
-        assert_eq!(nodes.gpu.models[0].free_nodes, 2);
-        assert_eq!(nodes.gpu.models[1].model, "h100");
-        assert_eq!(maintenance.len(), 2);
-        assert_eq!(maintenance[0].reason.as_deref(), Some("maintenance Tue"));
+        let parsed = parse_sinfo(raw);
+        assert_eq!(parsed.nodes.total_nodes, 13);
+        assert_eq!(parsed.nodes.free_nodes, 7);
+        assert_eq!(parsed.nodes.unavailable_nodes, 3);
+        assert_eq!(parsed.nodes.gpu.total_nodes, 6);
+        assert_eq!(parsed.nodes.gpu.free_nodes, 2);
+        assert_eq!(parsed.nodes.gpu.total_devices, 28);
+        assert_eq!(parsed.nodes.gpu.free_devices, 8);
+        assert_eq!(parsed.nodes.cpu.total_nodes, 7);
+        assert_eq!(parsed.nodes.cpu.free_nodes, 5);
+        assert_eq!(parsed.nodes.gpu.models[0].model, "a100");
+        assert_eq!(parsed.nodes.gpu.models[0].free_nodes, 2);
+        assert_eq!(parsed.nodes.gpu.models[1].model, "h100");
+        assert_eq!(parsed.maintenance.len(), 2);
+        assert_eq!(
+            parsed.maintenance[0].reason.as_deref(),
+            Some("maintenance Tue")
+        );
     }
 
     #[test]

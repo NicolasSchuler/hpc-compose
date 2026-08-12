@@ -35,10 +35,6 @@ const SENSITIVE_NAME_NEEDLES: &[&str] = &[
 /// drift from the substitution itself.
 pub const REDACTED_PLACEHOLDER: &str = "<redacted>";
 
-// Transitional crate-internal compatibility for the command-layer commit.
-// Secret-source projection is owned by `crate::context`.
-pub(crate) use crate::context::secret_value_set;
-
 /// Returns `true` when *name* matches the sensitive-name heuristic.
 #[must_use]
 pub fn is_sensitive_name(name: &str) -> bool {

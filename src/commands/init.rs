@@ -13,9 +13,9 @@ use hpc_compose::context::{
     BinaryOverrides, Settings, repo_adjacent_settings_path, write_settings,
 };
 use hpc_compose::init::{
-    cache_dir_placeholder as init_cache_dir_placeholder, next_commands,
+    InitAnswers, cache_dir_placeholder as init_cache_dir_placeholder, next_commands,
     prompt_for_init_with_cache_dir_default, render_template_with_optional_cache_dir,
-    write_initialized_template,
+    resolve_template, write_initialized_template,
 };
 use hpc_compose::term;
 
@@ -66,7 +66,7 @@ pub(crate) fn new_command(
         return Ok(());
     }
     let prompt_cache_dir = cache_dir.clone();
-    let answers = output_init::resolve_init_answers(template, name, cache_dir, || {
+    let answers = resolve_init_answers(template, name, cache_dir, || {
         prompt_for_init_with_cache_dir_default(prompt_cache_dir.as_deref())
     })?;
     let rendered = render_template_with_optional_cache_dir(
@@ -99,6 +99,46 @@ pub(crate) fn new_command(
         }
     }
     Ok(())
+}
+
+fn resolve_init_answers(
+    template: Option<String>,
+    name: Option<String>,
+    cache_dir: Option<String>,
+    prompt_for_answers: impl FnOnce() -> Result<InitAnswers>,
+) -> Result<InitAnswers> {
+    if let Some(template_name) = template {
+        let template = resolve_template(&template_name)?;
+        let cache_dir = match cache_dir {
+            Some(cache_dir) if !cache_dir.trim().is_empty() => Some(cache_dir),
+            Some(_) => bail!(
+                "--cache-dir cannot be empty; choose a path visible from both the login node and the compute nodes"
+            ),
+            None => None,
+        };
+        Ok(InitAnswers {
+            template_name: template.name.to_string(),
+            app_name: match name {
+                Some(name) => name,
+                None => template.name.to_string(),
+            },
+            cache_dir,
+        })
+    } else {
+        let mut answers = prompt_for_answers()?;
+        if let Some(name) = name {
+            answers.app_name = name;
+        }
+        if let Some(cache_dir) = cache_dir {
+            if cache_dir.trim().is_empty() {
+                bail!(
+                    "--cache-dir cannot be empty; choose a path visible from both the login node and the compute nodes"
+                );
+            }
+            answers.cache_dir = Some(cache_dir);
+        }
+        Ok(answers)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -930,10 +970,164 @@ fn dedup_preserve_order(items: Vec<String>) -> Vec<String> {
 mod tests {
     use super::*;
 
+    use std::cell::Cell;
     use std::io::Cursor;
 
     use clap_complete::Shell;
     use hpc_compose::context::load_settings;
+
+    #[test]
+    fn resolve_init_answers_explicit_path_preserves_precedence_and_exact_bytes() {
+        let prompt_calls = Cell::new(0);
+        let canonical = resolve_init_answers(
+            Some("\u{2003}dev-python-app.yaml\t".to_string()),
+            None,
+            None,
+            || {
+                prompt_calls.set(prompt_calls.get() + 1);
+                Err(anyhow::anyhow!("explicit template unexpectedly prompted"))
+            },
+        )
+        .expect("canonical explicit answers");
+        assert_eq!(canonical.template_name.as_bytes(), b"dev-python-app");
+        assert_eq!(canonical.app_name.as_bytes(), b"dev-python-app");
+        assert_eq!(canonical.cache_dir, None);
+
+        let expected_name = " app \u{03a9}\t";
+        let expected_cache = " \t/shared/\u{7f13}\u{5b58} path \n";
+        let retained = resolve_init_answers(
+            Some("\u{2003}dev-python-app.yaml\t".to_string()),
+            Some(expected_name.to_string()),
+            Some(expected_cache.to_string()),
+            || {
+                prompt_calls.set(prompt_calls.get() + 1);
+                Err(anyhow::anyhow!("explicit template unexpectedly prompted"))
+            },
+        )
+        .expect("byte-retaining explicit answers");
+        assert_eq!(retained.template_name.as_bytes(), b"dev-python-app");
+        assert_eq!(retained.app_name.as_bytes(), expected_name.as_bytes());
+        assert_eq!(
+            retained.cache_dir.as_deref().map(str::as_bytes),
+            Some(expected_cache.as_bytes())
+        );
+
+        let unknown = "\u{2003}missing-template.yaml\t";
+        let expected_unknown = hpc_compose::init::resolve_template(unknown)
+            .expect_err("unknown template baseline")
+            .to_string();
+        let err = resolve_init_answers(
+            Some(unknown.to_string()),
+            None,
+            Some("\u{2003}\t".to_string()),
+            || {
+                prompt_calls.set(prompt_calls.get() + 1);
+                Err(anyhow::anyhow!("explicit template unexpectedly prompted"))
+            },
+        )
+        .expect_err("unknown template wins over blank cache");
+        assert_eq!(err.to_string(), expected_unknown);
+        assert_eq!(hpc_compose::exit::exit_code_for(&err), 1);
+
+        let err = resolve_init_answers(
+            Some("dev-python-app".to_string()),
+            None,
+            Some("\u{2003}\t".to_string()),
+            || {
+                prompt_calls.set(prompt_calls.get() + 1);
+                Err(anyhow::anyhow!("explicit template unexpectedly prompted"))
+            },
+        )
+        .expect_err("valid template rejects blank cache");
+        assert_eq!(
+            err.to_string(),
+            "--cache-dir cannot be empty; choose a path visible from both the login node and the compute nodes"
+        );
+        assert_eq!(hpc_compose::exit::exit_code_for(&err), 1);
+        assert_eq!(prompt_calls.get(), 0);
+    }
+
+    #[test]
+    fn resolve_init_answers_prompt_path_preserves_precedence_and_exact_bytes() {
+        let prompt_calls = Cell::new(0);
+        let expected_template = " unresolved-template.yaml \n";
+        let expected_name = " prompted \u{03a9}\t";
+        let expected_cache = "\u{2003}\t";
+        let retained = resolve_init_answers(None, None, None, || {
+            prompt_calls.set(prompt_calls.get() + 1);
+            Ok(hpc_compose::init::InitAnswers {
+                template_name: expected_template.to_string(),
+                app_name: expected_name.to_string(),
+                cache_dir: Some(expected_cache.to_string()),
+            })
+        })
+        .expect("unmodified prompted answers");
+        assert_eq!(prompt_calls.get(), 1);
+        assert_eq!(
+            retained.template_name.as_bytes(),
+            expected_template.as_bytes()
+        );
+        assert_eq!(retained.app_name.as_bytes(), expected_name.as_bytes());
+        assert_eq!(
+            retained.cache_dir.as_deref().map(str::as_bytes),
+            Some(expected_cache.as_bytes())
+        );
+
+        let prompt_calls = Cell::new(0);
+        let override_name = " override \u{03a9}\t";
+        let override_cache = " \t/shared/\u{7f13}\u{5b58} override \n";
+        let overridden = resolve_init_answers(
+            None,
+            Some(override_name.to_string()),
+            Some(override_cache.to_string()),
+            || {
+                prompt_calls.set(prompt_calls.get() + 1);
+                Ok(hpc_compose::init::InitAnswers {
+                    template_name: expected_template.to_string(),
+                    app_name: expected_name.to_string(),
+                    cache_dir: Some("prompt cache".to_string()),
+                })
+            },
+        )
+        .expect("overridden prompted answers");
+        assert_eq!(prompt_calls.get(), 1);
+        assert_eq!(
+            overridden.template_name.as_bytes(),
+            expected_template.as_bytes()
+        );
+        assert_eq!(overridden.app_name.as_bytes(), override_name.as_bytes());
+        assert_eq!(
+            overridden.cache_dir.as_deref().map(str::as_bytes),
+            Some(override_cache.as_bytes())
+        );
+
+        let prompt_calls = Cell::new(0);
+        let err = resolve_init_answers(None, None, Some("\u{2003}\t".to_string()), || {
+            prompt_calls.set(prompt_calls.get() + 1);
+            Ok(hpc_compose::init::InitAnswers {
+                template_name: "dev-python-app".to_string(),
+                app_name: "prompted".to_string(),
+                cache_dir: Some("prompt cache".to_string()),
+            })
+        })
+        .expect_err("blank cache override follows a successful prompt");
+        assert_eq!(prompt_calls.get(), 1);
+        assert_eq!(
+            err.to_string(),
+            "--cache-dir cannot be empty; choose a path visible from both the login node and the compute nodes"
+        );
+        assert_eq!(hpc_compose::exit::exit_code_for(&err), 1);
+
+        let prompt_calls = Cell::new(0);
+        let err = resolve_init_answers(None, None, Some("\u{2003}\t".to_string()), || {
+            prompt_calls.set(prompt_calls.get() + 1);
+            Err(anyhow::anyhow!("prompt failed \u{03a9}"))
+        })
+        .expect_err("prompt error wins over blank cache override");
+        assert_eq!(prompt_calls.get(), 1);
+        assert_eq!(err.to_string(), "prompt failed \u{03a9}");
+        assert_eq!(hpc_compose::exit::exit_code_for(&err), 1);
+    }
 
     #[test]
     fn helper_parsers_cover_success_and_error_paths() {

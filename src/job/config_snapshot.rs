@@ -12,7 +12,6 @@ use crate::spec::EffectiveComposeConfig;
 /// [`crate::context::ResolvedContext::secret_values`] (declared `secrets:`
 /// values) so values referenced under benign env names are caught in addition
 /// to name-based redaction.
-#[allow(dead_code)]
 pub(crate) fn effective_config_snapshot_yaml(
     config: &EffectiveComposeConfig,
     secret_values: &BTreeSet<String>,

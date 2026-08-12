@@ -9,21 +9,19 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::OutputFormat;
 use hpc_compose::cluster::{
-    ClusterProfile, MpiInstallationProfile, default_cluster_profile_path,
-    discover_cluster_profile_path, generate_cluster_profile, load_cluster_profile,
+    ClusterProfile, MpiInstallationProfile, default_cluster_profile_path, generate_cluster_profile,
     mpi_type_compatible_with_profile, write_cluster_profile,
 };
 use hpc_compose::context::{ResolvedBinaries, ResolvedContext};
+use hpc_compose::diagnostics::{Item, Level, Report};
 use hpc_compose::planner::ExecutionSpec;
-use hpc_compose::preflight::{Item, Level, Report};
 use hpc_compose::prepare::{PrepareOptions, prepare_runtime_plan};
 use hpc_compose::process_probe;
 use hpc_compose::readiness_util::{
     ReadinessProbeDescription, ReadinessProbeResult, describe_readiness_probe, run_readiness_probe,
 };
 use hpc_compose::render::{
-    RenderOptions, display_srun_command_for_backend, log_file_name_for_service,
-    render_script_with_options,
+    RenderOptions, display_srun_command_for_backend, render_script_with_options,
 };
 use hpc_compose::runtime_plan::{RuntimePlan, RuntimeService, build_runtime_plan};
 use hpc_compose::spec::{MpiProfile, ServiceFailurePolicy, SlurmConfig};
@@ -31,6 +29,8 @@ use hpc_compose::spec::{MpiProfile, ServiceFailurePolicy, SlurmConfig};
 use crate::commands::load;
 use crate::mpi_util::{advertised_mpi_types, preferred_mpi_type_description, resolved_rank_count};
 use crate::output;
+pub(crate) use crate::output::{ClusterReportJsonOutput, ReadinessDoctorOutput};
+use crate::tracked_paths::log_file_name_for_service;
 
 static SMOKE_SCRIPT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -523,6 +523,7 @@ pub(crate) fn doctor_readiness(
     } else {
         None
     };
+    let probe_passed = result.as_ref().is_none_or(|result| result.passed);
     let output = ReadinessDoctorOutput::new(service.name.clone(), run, description, result);
 
     match output_format {
@@ -536,34 +537,11 @@ pub(crate) fn doctor_readiness(
         }
     }
 
-    if run && !output.passed {
+    if run && !probe_passed {
         // The readiness target is not reachable/ready: exit 3.
         return Err(crate::exit::EnvironmentError::new("readiness probe failed").into());
     }
     Ok(())
-}
-
-#[derive(Debug, serde::Serialize, schemars::JsonSchema)]
-pub(crate) struct ReadinessDoctorOutput {
-    pub(crate) schema_version: u32,
-    ok: bool,
-    service: String,
-    #[serde(rename = "type")]
-    probe_type: &'static str,
-    mode: &'static str,
-    // `ReadinessProbeTarget` (in `hpc_compose::readiness_util`) does not derive
-    // `JsonSchema` and is outside this task's editable scope, so describe it as a
-    // permissive JSON value in the published schema. Serde output is unchanged.
-    #[schemars(with = "serde_json::Value")]
-    target: hpc_compose::readiness_util::ReadinessProbeTarget,
-    timeout_seconds: u64,
-    ran: bool,
-    passed: bool,
-    elapsed_seconds: Option<f64>,
-    diagnostics: Vec<String>,
-    next_steps: Vec<String>,
-    required_tool: Option<&'static str>,
-    generated_behavior: String,
 }
 
 impl ReadinessDoctorOutput {
@@ -690,17 +668,6 @@ pub(crate) struct FabricSmokeOptions {
     pub(crate) quiet: bool,
 }
 
-/// `doctor --cluster-report --format json` output. Hoisted from a
-/// function-local struct so it is a published-schema-ready named DTO.
-#[derive(serde::Serialize, schemars::JsonSchema)]
-pub(crate) struct ClusterReportJsonOutput<'a> {
-    pub(crate) schema_version: u32,
-    path: Option<&'a Path>,
-    wrote: bool,
-    profile: &'a ClusterProfile,
-    diagnostics: hpc_compose::preflight::GroupedReport,
-}
-
 fn doctor_cluster_report(
     output_format: OutputFormat,
     binaries: &ResolvedBinaries,
@@ -747,10 +714,7 @@ fn load_discovered_cluster_profile(context: &ResolvedContext) -> Result<Option<C
         .value
         .parent()
         .unwrap_or_else(|| Path::new("."));
-    let Some(path) = discover_cluster_profile_path(start) else {
-        return Ok(None);
-    };
-    Ok(Some(load_cluster_profile(&path)?))
+    hpc_compose::cluster::load_discovered_cluster_profile(start)
 }
 
 fn mpi_profile_warnings(
@@ -1962,6 +1926,99 @@ mod tests {
     use hpc_compose::context::{ResolvedValue, ValueSource};
     use hpc_compose::planner::{ImageSource, ServicePlacement};
     use hpc_compose::spec::{MpiConfig, MpiLauncher, MpiType, RuntimeConfig, ServiceSlurmConfig};
+
+    fn normalize_pretty_field(
+        document: &str,
+        field: &str,
+        nested_document: &str,
+        marker: &str,
+    ) -> String {
+        let mut lines = nested_document.lines();
+        let first = lines.next().expect("nested JSON has a first line");
+        let indented = std::iter::once(first.to_string())
+            .chain(lines.map(|line| format!("  {line}")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let needle = format!("  \"{field}\": {indented}");
+        assert!(document.contains(&needle), "missing nested field {field}");
+        document.replacen(&needle, &format!("  \"{field}\": \"{marker}\""), 1)
+    }
+
+    #[test]
+    fn doctor_outputs_preserve_exact_pretty_json_bytes() {
+        let profile = ClusterProfile::default();
+        let diagnostics = Report { items: Vec::new() }.grouped();
+        let profile_json =
+            crate::output::to_pretty_json(&profile).expect("serialize cluster profile fixture");
+        let diagnostics_json = crate::output::to_pretty_json(&diagnostics)
+            .expect("serialize cluster diagnostics fixture");
+        let cluster = ClusterReportJsonOutput {
+            schema_version: 1,
+            path: None,
+            wrote: false,
+            profile: &profile,
+            diagnostics,
+        };
+        let actual = crate::output::to_pretty_json(&cluster)
+            .expect("serialize cluster report output fixture");
+        assert!(!actual.ends_with('\n'));
+        let actual = normalize_pretty_field(&actual, "profile", &profile_json, "<profile>");
+        let actual =
+            normalize_pretty_field(&actual, "diagnostics", &diagnostics_json, "<diagnostics>");
+        let expected = r#"{
+  "schema_version": 1,
+  "path": null,
+  "wrote": false,
+  "profile": "<profile>",
+  "diagnostics": "<diagnostics>"
+}"#;
+        assert_eq!(actual, expected);
+
+        let readiness = ReadinessDoctorOutput::new(
+            "app".to_string(),
+            false,
+            ReadinessProbeDescription {
+                probe_type: "log",
+                target: hpc_compose::readiness_util::ReadinessProbeTarget::Log {
+                    pattern: "READY".to_string(),
+                    log_file: None,
+                },
+                timeout_seconds: 7,
+                required_tool: None,
+                generated_behavior: "wait_for_log app READY".to_string(),
+            },
+            None,
+        );
+        let actual = crate::output::to_pretty_json(&readiness)
+            .expect("serialize readiness doctor output fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "ok": true,
+  "service": "app",
+  "type": "log",
+  "mode": "explain",
+  "target": {
+    "kind": "log",
+    "pattern": "READY",
+    "log_file": null
+  },
+  "timeout_seconds": 7,
+  "ran": false,
+  "passed": true,
+  "elapsed_seconds": null,
+  "diagnostics": [
+    "--run was not passed; this command only explained the normalized probe"
+  ],
+  "next_steps": [
+    "Pass --run to evaluate the probe from the current host.",
+    "Use this only for an already running service, tunnel, tracked log, or login-node-visible endpoint."
+  ],
+  "required_tool": null,
+  "generated_behavior": "wait_for_log app READY"
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+    }
 
     fn resolved_string(value: &str) -> ResolvedValue<String> {
         ResolvedValue {

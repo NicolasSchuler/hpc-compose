@@ -355,7 +355,8 @@ fn jobs_list_ignores_corrupt_records_and_reports_valid_jobs() {
     let jobs = payload["jobs"].as_array().expect("jobs array");
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0]["job_id"], Value::from("11111"));
-    let notice: Value = serde_json::from_str(stderr_text(&json).trim()).expect("notice json");
+    let json_stderr = stderr_text(&json);
+    let notice: Value = serde_json::from_str(json_stderr.trim()).expect("notice json");
     assert_eq!(notice["schema_version"], Value::from(1));
     assert_eq!(notice["level"], Value::from("warning"));
     assert_eq!(notice["code"], Value::from("corrupt_job_record"));
@@ -365,13 +366,22 @@ fn jobs_list_ignores_corrupt_records_and_reports_valid_jobs() {
             .expect("notice message")
             .contains("ignoring corrupt job record")
     );
+    assert_eq!(notice["remediation"], Value::Null);
+    let notice_message = notice["message"].as_str().expect("notice message");
+    assert_eq!(
+        json_stderr,
+        format!(
+            "{{\"schema_version\":1,\"level\":\"warning\",\"code\":\"corrupt_job_record\",\"message\":{},\"remediation\":null}}\n",
+            serde_json::to_string(notice_message).expect("notice message JSON")
+        )
+    );
 
     let text = run_cli(tmpdir.path(), &["jobs", "list"]);
     assert_success(&text);
     let stdout = stdout_text(&text);
     assert!(stdout.contains("11111"));
     assert!(!stdout.contains("corrupt"));
-    assert!(stderr_text(&text).contains("warning: ignoring corrupt job record"));
+    assert_eq!(stderr_text(&text), format!("warning: {notice_message}\n"));
 }
 
 #[test]

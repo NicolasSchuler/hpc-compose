@@ -5,9 +5,10 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use hpc_compose::cache::{CacheEntryKind, load_manifest_if_exists};
+use hpc_compose::cache::CacheEntryKind;
 use hpc_compose::cli::{CsvOutputFormat, OutputFormat, StatsOutputFormat};
 use hpc_compose::cluster::ClusterProfile;
+use hpc_compose::diagnostics::Report;
 use hpc_compose::init::{
     cache_dir_placeholder as init_cache_dir_placeholder, resolve_template, template_category,
     templates,
@@ -19,29 +20,49 @@ use hpc_compose::job::{
     SubmissionBackend, WatchOutcome, WatchdogSnapshot, collector_coverage_summaries,
     scheduler_source_label, telemetry_coverage_warnings,
 };
-use hpc_compose::planner::{
-    ExecutionSpec, ImageSource, Plan, ServicePlacementMode, registry_host_for_remote,
-};
-use hpc_compose::preflight::Report;
+use hpc_compose::planner::{ExecutionSpec, ImageSource, Plan, ServicePlacementMode};
 use hpc_compose::prepare::{ArtifactAction, PrepareSummary};
 use hpc_compose::render::{
     display_srun_command_for_backend, distributed_environment_names_for_service, execution_argv,
-    log_file_name_for_service, parallelism_environment_names_for_service,
+    parallelism_environment_names_for_service,
 };
 use hpc_compose::runtime_plan::{RuntimePlan, RuntimeService, base_image_path_for_backend};
-use hpc_compose::spec::{
-    DependencyCondition, EffectiveComposeConfig, ReadinessSpec, ServiceDependency,
-    parse_slurm_time_limit,
-};
+use hpc_compose::spec::{DependencyCondition, ServiceDependency, parse_slurm_time_limit};
 use hpc_compose::term;
 use serde::Serialize;
+
+use crate::cache::observation::{
+    ReuseExpectation, artifact_presence, rebuild_reason as cache_rebuild_reason, reuse_expectation,
+};
+use crate::domain::extract_human_sbatch_job_id;
+use crate::memory::format_binary_bytes;
+use crate::readiness_analysis::readiness_endpoint;
+use crate::shell_quote::quote_if_needed_for_display;
+use crate::tracked_paths::log_file_name_for_service;
 
 pub(crate) mod cache;
 pub(crate) mod common;
 pub(crate) mod contract;
+mod doctor;
+mod evolve;
+mod examples;
+mod feedback;
 pub(crate) mod init;
 pub(crate) mod runtime;
 pub(crate) mod spec;
+mod sweep;
+mod workspace;
+
+pub(crate) use doctor::{ClusterReportJsonOutput, ReadinessDoctorOutput};
+pub(crate) use evolve::{LessonDescriptionOutput, LessonListOutput, StepDescriptionOutput};
+pub(crate) use examples::{ExamplesListOutput, ExamplesRecommendOutput};
+pub(crate) use feedback::{FeedbackOutput, FeedbackReport};
+pub(crate) use sweep::{
+    SweepListOutput, SweepStatsOutput, SweepStatsTrial, SweepStopOutput, SweepSubmitOutput,
+};
+pub(crate) use workspace::{
+    WorkspaceAllocateOutput, WorkspaceExtendOutput, WorkspaceReleaseOutput, WorkspaceStatusOutput,
+};
 
 /// Version stamped into every owned command output DTO's `schema_version`
 /// field. Bump only on a breaking (removal/rename) change to any such output;
@@ -159,23 +180,17 @@ pub(crate) struct SubmitEndpoint {
 pub(crate) fn build_submit_endpoints(plan: &RuntimePlan) -> Vec<SubmitEndpoint> {
     plan.ordered_services
         .iter()
-        .filter_map(|service| match service.readiness.as_ref() {
-            Some(ReadinessSpec::Tcp { port, host, .. }) => Some(SubmitEndpoint {
-                service: service.name.clone(),
-                host: host.clone().unwrap_or_else(|| "<host>".to_string()),
-                port: *port,
-                url: None,
-            }),
-            Some(ReadinessSpec::Http { url, .. }) => {
-                let (host, port) = http_host_port(url);
-                Some(SubmitEndpoint {
+        .filter_map(|service| {
+            service
+                .readiness
+                .as_ref()
+                .and_then(readiness_endpoint)
+                .map(|endpoint| SubmitEndpoint {
                     service: service.name.clone(),
-                    host,
-                    port,
-                    url: Some(url.clone()),
+                    host: endpoint.host,
+                    port: endpoint.port,
+                    url: endpoint.url,
                 })
-            }
-            _ => None,
         })
         .collect()
 }
@@ -246,7 +261,7 @@ fn file_arg(file: Option<&Path>) -> String {
 
 fn shell_arg(path: &Path) -> String {
     let raw = path.display().to_string();
-    format!("'{}'", raw.replace('\'', "'\\''"))
+    crate::shell_quote::quote_always_with_backslash_apostrophe(&raw)
 }
 
 /// Suggested next commands after a clean spec check (`validate`): continue along
@@ -278,38 +293,6 @@ pub(crate) fn print_next_steps(commands: &[String]) {
     println!("Next:");
     for command in commands {
         println!("  {command}");
-    }
-}
-
-/// Best-effort host+port from an HTTP(S) URL authority. Strips userinfo, handles
-/// IPv6 brackets, and defaults the port to 80/443 by scheme. Self-contained so
-/// the output layer keeps no dependency on the readiness probe module.
-fn http_host_port(url: &str) -> (String, u16) {
-    let default_port = if url.starts_with("https://") { 443 } else { 80 };
-    let placeholder = || ("<host>".to_string(), default_port);
-    let Some((_, after_scheme)) = url.split_once("://") else {
-        return placeholder();
-    };
-    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    if authority.is_empty() {
-        return placeholder();
-    }
-    if let Some(rest) = authority.strip_prefix('[') {
-        // IPv6 literal: [::1]:8000
-        let Some(end) = rest.find(']') else {
-            return placeholder();
-        };
-        let host = rest[..end].to_string();
-        let port = rest[end + 1..]
-            .strip_prefix(':')
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(default_port);
-        return (host, port);
-    }
-    match authority.split_once(':') {
-        Some((host, port)) => (host.to_string(), port.parse().unwrap_or(default_port)),
-        None => (authority.to_string(), default_port),
     }
 }
 
@@ -438,39 +421,6 @@ pub(crate) fn build_validate_output(plan: &Plan, cluster_warnings: Vec<String>) 
             .collect(),
         cluster_warnings,
     }
-}
-
-/// Serializes the effective config as YAML for the persisted job-state
-/// snapshot (and `diff` comparisons), redacting resolved secret values first.
-///
-/// The snapshot is written to `.hpc-compose/` on a shared filesystem, so it
-/// must not carry cleartext secrets — `config`/`context`/`inspect` already
-/// redact the same struct on display, and this keeps the at-rest copy
-/// consistent. Pass the secret value set from
-/// [`crate::context::ResolvedContext::secret_values`] (declared `secrets:`
-/// values) so values referenced under benign env names are caught in addition
-/// to name-based redaction.
-pub(crate) fn effective_config_yaml(
-    config: &EffectiveComposeConfig,
-    secret_values: &std::collections::BTreeSet<String>,
-) -> Result<String> {
-    let value = crate::redaction::redacted_yaml_value(config, secret_values, false)
-        .context("failed to redact effective config for snapshot")?;
-    serde_norway::to_string(&value).context("failed to serialize effective config as yaml")
-}
-
-pub(crate) fn default_script_path(spec_path: &Path) -> PathBuf {
-    let parent = spec_path.parent().unwrap_or_else(|| Path::new("."));
-    parent.join("hpc-compose.sbatch")
-}
-
-pub(crate) fn default_local_script_path(spec_path: &Path) -> PathBuf {
-    let parent = spec_path.parent().unwrap_or_else(|| Path::new("."));
-    parent.join("hpc-compose.local.sh")
-}
-
-pub(crate) fn default_cache_dir() -> PathBuf {
-    crate::path_util::default_cache_dir()
 }
 
 pub(crate) fn print_report(report: &Report, verbose: bool) {
@@ -664,7 +614,7 @@ fn write_job_inventory_scan(
             write!(
                 writer,
                 " size={}",
-                format_bytes(job.disk_usage_bytes.unwrap_or(0))
+                format_binary_bytes(job.disk_usage_bytes.unwrap_or(0))
             )?;
         }
         writeln!(writer)?;
@@ -712,7 +662,7 @@ fn write_cleanup_report(
         writeln!(
             writer,
             "total bytes reclaimed: {}",
-            format_bytes(report.total_bytes_reclaimed.unwrap_or(0))
+            format_binary_bytes(report.total_bytes_reclaimed.unwrap_or(0))
         )?;
     }
     if report.removed_job_ids.is_empty() {
@@ -739,7 +689,7 @@ fn write_cleanup_report(
                 write!(
                     writer,
                     " size={}",
-                    format_bytes(job.bytes_reclaimed.unwrap_or(0))
+                    format_binary_bytes(job.bytes_reclaimed.unwrap_or(0))
                 )?;
             }
             writeln!(writer)?;
@@ -801,7 +751,7 @@ fn write_deep_cleanup_details(
             write!(
                 writer,
                 " size={}",
-                format_bytes(entry.bytes_reclaimed.unwrap_or(0))
+                format_binary_bytes(entry.bytes_reclaimed.unwrap_or(0))
             )?;
         }
         writeln!(writer)?;
@@ -2475,15 +2425,19 @@ fn write_tree_node(
         .ordered_services
         .iter()
         .find(|rs| rs.name == svc.name)
-        .map(|rs| runtime_cache_state(rs))
-        .unwrap_or("unknown");
+        .map(reuse_expectation);
 
     let state_colored = match state {
-        "cache hit" | "local image present" => term::styled_success_raw(state),
-        "rebuild on prepare" | "cache miss" | "local image missing" => {
-            term::styled_warning_raw(state)
+        Some(expectation @ (ReuseExpectation::CacheHit | ReuseExpectation::LocalImagePresent)) => {
+            term::styled_success_raw(expectation.label())
         }
-        _ => state.to_string(),
+        Some(
+            expectation @ (ReuseExpectation::RebuildOnPrepare
+            | ReuseExpectation::CacheMiss
+            | ReuseExpectation::LocalImageMissing),
+        ) => term::styled_warning_raw(expectation.label()),
+        Some(expectation) => expectation.label().to_string(),
+        None => "unknown".to_string(),
     };
 
     if prefix.is_empty() {
@@ -2836,8 +2790,8 @@ fn write_plan_inspect_verbose(
             "step geometry: {}",
             format_service_step_geometry(runtime)
         )?;
-        if let Some(reason) = rebuild_reason(runtime) {
-            writeln!(writer, "rebuild reason: {reason}")?;
+        if let Some(reason) = cache_rebuild_reason(runtime) {
+            writeln!(writer, "rebuild reason: {}", reason.label())?;
         }
     }
     Ok(())
@@ -2903,7 +2857,7 @@ fn shell_quote_arg(value: &str) -> String {
     }) {
         value.to_string()
     } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
+        crate::shell_quote::quote_always_with_backslash_apostrophe(value)
     }
 }
 
@@ -3102,14 +3056,14 @@ fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result
             writeln!(
                 writer,
                 "base cache state: {}",
-                hit_or_miss(base_path.exists())
+                artifact_presence(&base_path).cache_state_label()
             )?;
         }
         writeln!(writer, "runtime image: {}", service.runtime_image.display())?;
         writeln!(
             writer,
             "runtime image state: {}",
-            runtime_cache_state(service)
+            reuse_expectation(service).label()
         )?;
         writeln!(
             writer,
@@ -3158,70 +3112,6 @@ fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result
     Ok(())
 }
 
-pub(crate) fn build_cache_inspect_report(
-    plan: &RuntimePlan,
-    filter: Option<&str>,
-) -> Result<CacheInspectReport> {
-    let mut services = Vec::new();
-    for service in &plan.ordered_services {
-        if let Some(filter_name) = filter
-            && service.name != filter_name
-        {
-            continue;
-        }
-
-        let base_artifact = if let ImageSource::Remote(_) = &service.source {
-            let base_path =
-                base_image_path_for_backend(&plan.cache_dir, service, plan.runtime.backend);
-            Some(CacheArtifactInspect {
-                path: base_path.clone(),
-                artifact_present: base_path.exists(),
-                manifest_path: hpc_compose::cache::manifest_path_for(&base_path),
-                manifest: load_manifest_if_exists(&base_path)?,
-            })
-        } else {
-            None
-        };
-
-        services.push(CacheInspectService {
-            service_name: service.name.clone(),
-            source_image: source_image_display(&service.source),
-            base_registry: match &service.source {
-                ImageSource::Remote(remote) => Some(registry_host_for_remote(remote)),
-                ImageSource::LocalSqsh(_) | ImageSource::LocalSif(_) | ImageSource::Host => None,
-            },
-            base_artifact,
-            runtime_artifact: build_cache_artifact_inspect(&service.runtime_image)?,
-            current_reuse_expectation: runtime_cache_state(service).to_string(),
-            note: service.prepare.as_ref().and_then(|prepare| {
-                if prepare.force_rebuild {
-                    Some(
-                        "this service rebuilds on prepare because prepare.mounts are present"
-                            .into(),
-                    )
-                } else {
-                    None
-                }
-            }),
-        });
-    }
-
-    Ok(CacheInspectReport {
-        schema_version: OUTPUT_SCHEMA_VERSION,
-        cache_dir: plan.cache_dir.clone(),
-        services,
-    })
-}
-
-fn build_cache_artifact_inspect(path: &Path) -> Result<CacheArtifactInspect> {
-    Ok(CacheArtifactInspect {
-        path: path.to_path_buf(),
-        artifact_present: path.exists(),
-        manifest_path: hpc_compose::cache::manifest_path_for(path),
-        manifest: load_manifest_if_exists(path)?,
-    })
-}
-
 fn write_cache_inspect(writer: &mut impl Write, report: &CacheInspectReport) -> Result<()> {
     for service in &report.services {
         writeln!(writer, "service: {}", service.service_name)?;
@@ -3252,12 +3142,6 @@ fn write_cache_inspect(writer: &mut impl Write, report: &CacheInspectReport) -> 
         writeln!(writer)?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn print_manifest_block(path: &Path) -> Result<()> {
-    let artifact = build_cache_artifact_inspect(path)?;
-    write_cache_artifact_block(&mut io::stdout(), &artifact)
 }
 
 fn write_cache_artifact_block(
@@ -3320,54 +3204,13 @@ fn write_cache_artifact_block(
     Ok(())
 }
 
-fn runtime_cache_state(service: &hpc_compose::runtime_plan::RuntimeService) -> &'static str {
-    if let Some(prepare) = &service.prepare {
-        if prepare.force_rebuild {
-            "rebuild on prepare"
-        } else if service.runtime_image.exists() {
-            "cache hit"
-        } else {
-            "cache miss"
-        }
-    } else {
-        match &service.source {
-            ImageSource::LocalSqsh(path) => {
-                if path.exists() {
-                    "local image present"
-                } else {
-                    "local image missing"
-                }
-            }
-            ImageSource::LocalSif(path) => {
-                if path.exists() {
-                    "local image present"
-                } else {
-                    "local image missing"
-                }
-            }
-            ImageSource::Remote(_) => {
-                if service.runtime_image.exists() {
-                    "cache hit"
-                } else {
-                    "cache miss"
-                }
-            }
-            ImageSource::Host => "host runtime",
-        }
-    }
-}
-
-fn source_image_display(source: &ImageSource) -> String {
+pub(crate) fn source_image_display(source: &ImageSource) -> String {
     match source {
         ImageSource::LocalSqsh(path) => path.display().to_string(),
         ImageSource::LocalSif(path) => path.display().to_string(),
         ImageSource::Remote(remote) => remote.clone(),
         ImageSource::Host => "host".to_string(),
     }
-}
-
-fn hit_or_miss(exists: bool) -> &'static str {
-    if exists { "cache hit" } else { "cache miss" }
 }
 
 fn yes_no(value: bool) -> &'static str {
@@ -3399,21 +3242,6 @@ fn runtime_presence_label(runtime_present: bool, legacy_present: bool) -> &'stat
         (true, false) => "runtime",
         (false, true) => "legacy",
         (false, false) => "missing",
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = bytes as f64;
-    let mut unit_index = 0;
-    while value >= 1024.0 && unit_index < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit_index += 1;
-    }
-    if unit_index == 0 {
-        format!("{bytes} {}", UNITS[unit_index])
-    } else {
-        format!("{value:.1} {}", UNITS[unit_index])
     }
 }
 
@@ -3525,46 +3353,6 @@ pub(crate) fn print_template_description(template_name: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn resolve_init_answers(
-    template: Option<String>,
-    name: Option<String>,
-    cache_dir: Option<String>,
-    prompt_for_answers: impl FnOnce() -> Result<hpc_compose::init::InitAnswers>,
-) -> Result<hpc_compose::init::InitAnswers> {
-    if let Some(template_name) = template {
-        let template = resolve_template(&template_name)?;
-        let cache_dir = match cache_dir {
-            Some(cache_dir) if !cache_dir.trim().is_empty() => Some(cache_dir),
-            Some(_) => bail!(
-                "--cache-dir cannot be empty; choose a path visible from both the login node and the compute nodes"
-            ),
-            None => None,
-        };
-        Ok(hpc_compose::init::InitAnswers {
-            template_name: template.name.to_string(),
-            app_name: match name {
-                Some(name) => name,
-                None => template.name.to_string(),
-            },
-            cache_dir,
-        })
-    } else {
-        let mut answers = prompt_for_answers()?;
-        if let Some(name) = name {
-            answers.app_name = name;
-        }
-        if let Some(cache_dir) = cache_dir {
-            if cache_dir.trim().is_empty() {
-                bail!(
-                    "--cache-dir cannot be empty; choose a path visible from both the login node and the compute nodes"
-                );
-            }
-            answers.cache_dir = Some(cache_dir);
-        }
-        Ok(answers)
-    }
-}
-
 pub(crate) fn print_submit_details(
     plan: &RuntimePlan,
     script_path: &Path,
@@ -3574,7 +3362,7 @@ pub(crate) fn print_submit_details(
     println!("cache dir: {}", plan.cache_dir.display());
 
     let submit_dir = env::current_dir().context("failed to determine submit working directory")?;
-    if let Some(job_id) = extract_job_id(sbatch_stdout) {
+    if let Some(job_id) = extract_human_sbatch_job_id(sbatch_stdout) {
         for service in &plan.ordered_services {
             println!(
                 "log  service '{}': {}",
@@ -3679,17 +3467,6 @@ pub(crate) fn print_interpolation_vars(
     println!("{table}");
 }
 
-pub(crate) fn extract_job_id(text: &str) -> Option<&str> {
-    const MARKER: &str = "Submitted batch job ";
-    let rest = &text[text.find(MARKER)? + MARKER.len()..];
-    let len = rest
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit())
-        .map(char::len_utf8)
-        .sum::<usize>();
-    (len > 0).then(|| &rest[..len])
-}
-
 pub(crate) fn print_prune_result(cache_dir: &Path, removed: &[PathBuf]) {
     println!(
         "{}",
@@ -3766,25 +3543,25 @@ fn print_watch_final_summary(record: &hpc_compose::job::SubmissionRecord, outcom
         if remediation.suggest_rightsize {
             println!(
                 "  rightsize: hpc-compose inspect --rightsize -f {} --job-id {}",
-                shell_quote(&record.compose_file.display().to_string()),
-                shell_quote(&record.job_id)
+                quote_if_needed_for_display(&record.compose_file.display().to_string()),
+                quote_if_needed_for_display(&record.job_id)
             );
         }
     }
     println!(
         "  debug: hpc-compose debug -f {} --job-id {}",
-        shell_quote(&record.compose_file.display().to_string()),
-        shell_quote(&record.job_id)
+        quote_if_needed_for_display(&record.compose_file.display().to_string()),
+        quote_if_needed_for_display(&record.job_id)
     );
     println!(
         "  logs:  hpc-compose logs -f {} --job-id {} --lines 200",
-        shell_quote(&record.compose_file.display().to_string()),
-        shell_quote(&record.job_id)
+        quote_if_needed_for_display(&record.compose_file.display().to_string()),
+        quote_if_needed_for_display(&record.job_id)
     );
     println!(
         "  stats: hpc-compose stats -f {} --job-id {}",
-        shell_quote(&record.compose_file.display().to_string()),
-        shell_quote(&record.job_id)
+        quote_if_needed_for_display(&record.compose_file.display().to_string()),
+        quote_if_needed_for_display(&record.job_id)
     );
 }
 
@@ -3817,17 +3594,6 @@ fn failed_service_hint(record: &hpc_compose::job::SubmissionRecord) -> Option<St
         }
     }
     None
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
 }
 
 fn execution_form_label(execution: &ExecutionSpec) -> &'static str {
@@ -3872,17 +3638,6 @@ fn readiness_description(readiness: Option<&hpc_compose::spec::ReadinessSpec>) -
             status_code,
             timeout_seconds.unwrap_or(60)
         ),
-    }
-}
-
-fn rebuild_reason(service: &hpc_compose::runtime_plan::RuntimeService) -> Option<&'static str> {
-    let prepare = service.prepare.as_ref()?;
-    if prepare.force_rebuild {
-        Some("prepare.mounts are present")
-    } else if !service.runtime_image.exists() {
-        Some("runtime cache artifact is missing")
-    } else {
-        None
     }
 }
 

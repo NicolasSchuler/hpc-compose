@@ -1481,6 +1481,148 @@ echo "$@" >> '{}'
     );
 }
 
+#[test]
+fn sweep_stop_prints_scancel_stdout_before_cancellation_summary() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_sweep_compose(tmpdir.path(), cache.path(), &["0.01"]);
+    let sbatch = write_incrementing_sbatch(tmpdir.path(), 51000);
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--no-preflight",
+            "--skip-prepare",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    let manifest_path = tmpdir.path().join(".hpc-compose/sweeps/latest.json");
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).expect("manifest"))
+            .expect("manifest JSON");
+    let sweep_id = manifest["sweep_id"].as_str().expect("sweep id");
+
+    let squeue = tmpdir.path().join("squeue-running");
+    write_script(
+        &squeue,
+        "#!/bin/bash\nset -euo pipefail\necho 'RUNNING|None|Unknown'\n",
+    );
+    let sacct = tmpdir.path().join("sacct-running");
+    write_script(
+        &sacct,
+        "#!/bin/bash\nset -euo pipefail\necho 'RUNNING|Unknown|Unknown|None'\n",
+    );
+    let scancel = tmpdir.path().join("scancel-with-stdout");
+    write_script(
+        &scancel,
+        "#!/bin/bash\nset -euo pipefail\nprintf 'scheduler accepted %s\\n' \"$1\"\n",
+    );
+
+    let stop = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "stop",
+            "-f",
+            compose.to_str().expect("path"),
+            "--yes",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+            "--scancel-bin",
+            scancel.to_str().expect("path"),
+        ],
+    );
+    assert_success(&stop);
+    assert_eq!(
+        stdout_text(&stop),
+        format!(
+            "scheduler accepted 51000\ncancelled job: 51000\nstopped sweep {sweep_id}: 1 trial(s) cancelled, 0 skipped\n"
+        )
+    );
+}
+
+#[test]
+fn sweep_stop_json_is_single_parseable_document_during_active_cancellation() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_sweep_compose(tmpdir.path(), cache.path(), &["0.01"]);
+    let sbatch = write_incrementing_sbatch(tmpdir.path(), 52000);
+    let submit = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "submit",
+            "-f",
+            compose.to_str().expect("path"),
+            "--no-preflight",
+            "--skip-prepare",
+            "--sbatch-bin",
+            sbatch.to_str().expect("path"),
+        ],
+    );
+    assert_success(&submit);
+    let manifest_path = tmpdir.path().join(".hpc-compose/sweeps/latest.json");
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).expect("manifest"))
+            .expect("manifest JSON");
+    let sweep_id = manifest["sweep_id"].as_str().expect("sweep id");
+    let trial_id = manifest["trials"][0]["trial_id"]
+        .as_str()
+        .expect("trial id");
+    let squeue = tmpdir.path().join("squeue-running-json");
+    write_script(
+        &squeue,
+        "#!/bin/bash\nset -euo pipefail\necho 'RUNNING|None|Unknown'\n",
+    );
+    let sacct = tmpdir.path().join("sacct-running-json");
+    write_script(
+        &sacct,
+        "#!/bin/bash\nset -euo pipefail\necho 'RUNNING|Unknown|Unknown|None'\n",
+    );
+    let scancel = tmpdir.path().join("scancel-with-stdout-json");
+    write_script(
+        &scancel,
+        "#!/bin/bash\nset -euo pipefail\nprintf 'scheduler accepted %s\\n' \"$1\"\n",
+    );
+
+    let stop = run_cli(
+        tmpdir.path(),
+        &[
+            "sweep",
+            "stop",
+            "-f",
+            compose.to_str().expect("path"),
+            "--yes",
+            "--format",
+            "json",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+            "--scancel-bin",
+            scancel.to_str().expect("path"),
+        ],
+    );
+    assert_success(&stop);
+    let stdout = stdout_text(&stop);
+    let payload: Value = serde_json::from_str(&stdout).expect("whole stdout is one JSON document");
+    let stopped_at = payload["stopped_at"].as_u64().expect("stopped_at");
+    assert_eq!(
+        stdout,
+        format!(
+            "{{\n  \"schema_version\": 1,\n  \"sweep_id\": \"{sweep_id}\",\n  \"cancelled_count\": 1,\n  \"skipped_count\": 0,\n  \"cancelled_trials\": [\n    \"{trial_id}\"\n  ],\n  \"skipped_trials\": [],\n  \"stopped_at\": {stopped_at},\n  \"stop_reason\": \"manual sweep stop\"\n}}\n"
+        )
+    );
+    assert!(stderr_text(&stop).is_empty());
+}
+
 fn write_scaling_sweep_compose(root: &Path, cache_dir: &Path) -> PathBuf {
     let compose = root.join("scaling.yaml");
     fs::write(

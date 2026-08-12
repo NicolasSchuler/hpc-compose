@@ -1,32 +1,10 @@
 use anyhow::{Context, Result};
 use hpc_compose::cli::{FeedbackKind, OutputFormat};
-use serde::Serialize;
 
 use crate::output;
+pub(crate) use crate::output::{FeedbackOutput, FeedbackReport};
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
-
-#[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub(crate) struct FeedbackOutput {
-    pub(crate) schema_version: u32,
-    pub(crate) kind: String,
-    pub(crate) issue_url: String,
-    pub(crate) report: FeedbackReport,
-    pub(crate) telemetry_sent: bool,
-}
-
-#[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub(crate) struct FeedbackReport {
-    pub(crate) package: String,
-    pub(crate) version: String,
-    pub(crate) repository: String,
-    pub(crate) build_rev: Option<String>,
-    pub(crate) build_dirty: bool,
-    pub(crate) os: String,
-    pub(crate) arch: String,
-}
 
 pub(crate) fn feedback(kind: FeedbackKind, format: Option<OutputFormat>) -> Result<()> {
     let output = build_feedback_output(kind);
@@ -140,5 +118,50 @@ impl FeedbackKind {
             FeedbackKind::Adoption => "adoption",
             FeedbackKind::Question => "question",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FeedbackOutput, FeedbackReport};
+
+    #[test]
+    fn feedback_output_preserves_exact_pretty_json_bytes() {
+        let output = FeedbackOutput {
+            schema_version: 1,
+            kind: "feature".to_string(),
+            issue_url: "https://example.invalid/issues/new?template=feature_request.yml"
+                .to_string(),
+            report: FeedbackReport {
+                package: "hpc-compose".to_string(),
+                version: "9.8.7".to_string(),
+                repository: "https://example.invalid/repo".to_string(),
+                build_rev: None,
+                build_dirty: false,
+                os: "fixture-os".to_string(),
+                arch: "fixture-arch".to_string(),
+            },
+            telemetry_sent: false,
+        };
+
+        let actual = crate::output::to_pretty_json(&output).expect("serialize feedback fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "kind": "feature",
+  "issue_url": "https://example.invalid/issues/new?template=feature_request.yml",
+  "report": {
+    "package": "hpc-compose",
+    "version": "9.8.7",
+    "repository": "https://example.invalid/repo",
+    "build_rev": null,
+    "build_dirty": false,
+    "os": "fixture-os",
+    "arch": "fixture-arch"
+  },
+  "telemetry_sent": false
+}"#;
+
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
     }
 }

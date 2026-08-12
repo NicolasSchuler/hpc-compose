@@ -67,7 +67,6 @@ pub(crate) fn default_cache_dir() -> PathBuf {
 
 /// Default path for the generated Slurm batch script, next to the compose
 /// file. This is purely lexical: it does not normalize or access the path.
-#[allow(dead_code)]
 pub(crate) fn default_script_path(spec_path: &Path) -> PathBuf {
     let parent = spec_path.parent().unwrap_or_else(|| Path::new("."));
     parent.join("hpc-compose.sbatch")
@@ -75,7 +74,6 @@ pub(crate) fn default_script_path(spec_path: &Path) -> PathBuf {
 
 /// Default path for the generated local launcher script, next to the compose
 /// file. This is purely lexical: it does not normalize or access the path.
-#[allow(dead_code)]
 pub(crate) fn default_local_script_path(spec_path: &Path) -> PathBuf {
     let parent = spec_path.parent().unwrap_or_else(|| Path::new("."));
     parent.join("hpc-compose.local.sh")

@@ -22,72 +22,21 @@ use anyhow::{Context, Result, bail};
 use hpc_compose::cli::OutputFormat;
 use hpc_compose::context::ResolvedContext;
 use hpc_compose::job::{
-    ArtifactManifest, EfficiencyScoreOptions, EfficiencyScoreReport, JobNote, JobProvenance,
-    SchedulerOptions, StatusSnapshot, SubmissionRecord, append_job_note, apply_tag_changes,
+    ArtifactManifest, EfficiencyScoreOptions, EfficiencyScoreReport, SchedulerOptions,
+    StatusSnapshot, SubmissionRecord, append_job_note, apply_tag_changes,
     artifact_manifest_path_for_record, build_efficiency_score_report, build_status_snapshot,
     update_submission_record,
 };
 use hpc_compose::runtime_plan::RuntimePlan;
-use serde::Serialize;
 
 use super::ssh_hint::{OTP_MULTIPLEX_NOTE, control_master_opts_str, ssh_forward_command};
 use super::{resolve_tracked_record, tracked_job_hint};
 use crate::commands::load;
+pub(crate) use crate::output::runtime::{
+    ExperimentNoteOutput, ExperimentService, ExperimentShowOutput, ExperimentTagOutput,
+};
+use crate::readiness_analysis::readiness_endpoint;
 use crate::{output, term};
-
-/// One JSON object aggregating the read-only state of a single tracked run.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct ExperimentShowOutput {
-    pub(crate) schema_version: u32,
-    job_id: String,
-    name: String,
-    state: String,
-    services: Vec<ExperimentService>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    provenance: Option<JobProvenance>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    results: Option<ArtifactManifest>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    efficiency: Option<EfficiencyScoreReport>,
-    /// User-assigned labels on the tracked record (see `experiment tag`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    tags: Vec<String>,
-    /// Append-only timestamped observations (see `experiment note`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    notes: Vec<JobNote>,
-    next_commands: Vec<String>,
-}
-
-/// `experiment tag` result (`--format json`): the record's full tag set after
-/// the change.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct ExperimentTagOutput {
-    pub(crate) schema_version: u32,
-    job_id: String,
-    tags: Vec<String>,
-}
-
-/// `experiment note` result (`--format json`): the record's full note list
-/// after the append.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct ExperimentNoteOutput {
-    pub(crate) schema_version: u32,
-    job_id: String,
-    notes: Vec<JobNote>,
-}
-
-/// Per-service slice of the aggregate: tracked placement plus a printable tunnel
-/// hint when the service exposes a TCP/HTTP readiness port.
-#[derive(Debug, Serialize, PartialEq, Eq, schemars::JsonSchema)]
-struct ExperimentService {
-    name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    nodelist: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tunnel_hint: Option<String>,
-}
 
 pub(crate) fn experiment_show(
     context: ResolvedContext,
@@ -213,10 +162,17 @@ fn build_experiment_show_output(
     login_host: Option<&str>,
 ) -> ExperimentShowOutput {
     let job_id = record.job_id.as_str();
-    // Readiness-derived endpoints (TCP/HTTP only), keyed by service name. The
-    // port + placeholder handling mirrors `reach`/`build_submit_endpoints`.
-    let endpoints = output::build_submit_endpoints(plan);
-
+    let endpoints = plan
+        .ordered_services
+        .iter()
+        .filter_map(|service| {
+            service
+                .readiness
+                .as_ref()
+                .and_then(readiness_endpoint)
+                .map(|endpoint| (service.name.as_str(), endpoint))
+        })
+        .collect::<Vec<_>>();
     let services = plan
         .ordered_services
         .iter()
@@ -229,8 +185,8 @@ fn build_experiment_show_output(
             let status = row.and_then(|row| row.status.clone());
             let tunnel_hint = endpoints
                 .iter()
-                .find(|endpoint| endpoint.service == service.name)
-                .map(|endpoint| {
+                .find(|(name, _)| *name == service.name.as_str())
+                .map(|(_, endpoint)| {
                     let compute = nodelist
                         .as_deref()
                         .and_then(|nodes| nodes.split(',').next())
@@ -442,10 +398,93 @@ fn print_experiment_show_output(output: &ExperimentShowOutput) {
 mod tests {
     use std::collections::BTreeMap;
 
-    use hpc_compose::job::{ArtifactManifest, GitProvenance, JobProvenance};
+    use hpc_compose::job::{ArtifactManifest, GitProvenance, JobNote, JobProvenance};
     use hpc_compose::spec::ComposeSpec;
 
     use super::*;
+
+    #[test]
+    fn experiment_outputs_preserve_exact_pretty_json_bytes() {
+        let note = JobNote {
+            text: "stable".to_string(),
+            created_at: 42,
+        };
+        let show = ExperimentShowOutput {
+            schema_version: 1,
+            job_id: "12345".to_string(),
+            name: "training".to_string(),
+            state: "RUNNING".to_string(),
+            services: vec![ExperimentService {
+                name: "api".to_string(),
+                nodelist: None,
+                status: None,
+                tunnel_hint: None,
+            }],
+            provenance: None,
+            results: None,
+            efficiency: None,
+            tags: vec!["baseline".to_string()],
+            notes: vec![note.clone()],
+            next_commands: vec!["hpc-compose status --job-id 12345".to_string()],
+        };
+        let actual = crate::output::to_pretty_json(&show).expect("serialize experiment fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "job_id": "12345",
+  "name": "training",
+  "state": "RUNNING",
+  "services": [
+    {
+      "name": "api"
+    }
+  ],
+  "tags": [
+    "baseline"
+  ],
+  "notes": [
+    {
+      "text": "stable",
+      "created_at": 42
+    }
+  ],
+  "next_commands": [
+    "hpc-compose status --job-id 12345"
+  ]
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+
+        let tag = ExperimentTagOutput {
+            schema_version: 1,
+            job_id: "12345".to_string(),
+            tags: vec!["baseline".to_string()],
+        };
+        let actual = crate::output::to_pretty_json(&tag).expect("serialize experiment tag fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "job_id": "12345",
+  "tags": [
+    "baseline"
+  ]
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+
+        let note_output = ExperimentNoteOutput {
+            schema_version: 1,
+            job_id: "12345".to_string(),
+            notes: Vec::new(),
+        };
+        let actual =
+            crate::output::to_pretty_json(&note_output).expect("serialize experiment note fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "job_id": "12345",
+  "notes": []
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+    }
 
     fn plan_with_services(yaml: &str) -> RuntimePlan {
         // Pure plan derivation only: build the normalized plan and map it into a

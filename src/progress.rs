@@ -7,6 +7,7 @@ use hpc_compose::prepare::{ArtifactAction, PrepareReporter, PrepareSummary};
 use hpc_compose::runtime_plan::RuntimePlan;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
+use crate::memory::format_binary_bytes;
 use crate::term;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,7 +287,7 @@ fn service_bar_message(
         message.push_str(line);
     }
     if bytes > 0 {
-        message.push_str(&format!(" ({} written)", humanize_bytes(bytes)));
+        message.push_str(&format!(" ({} written)", format_binary_bytes(bytes)));
     }
     if !phase.is_empty() {
         message.push_str(&format!(" [{}]", format_elapsed(elapsed)));
@@ -461,21 +462,6 @@ fn truncate_line(line: &str) -> String {
     }
     let truncated: String = line.chars().take(MAX - 1).collect();
     format!("{truncated}…")
-}
-
-fn humanize_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
 }
 
 #[cfg(test)]

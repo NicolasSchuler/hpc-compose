@@ -100,7 +100,7 @@ pub struct WorkspaceStateEntry {
 pub fn workspace_state_path(settings_path: Option<&Path>, cwd: &Path) -> PathBuf {
     match settings_path.and_then(Path::parent) {
         Some(dir) => dir.join(WORKSPACE_STATE_FILE_NAME),
-        None => crate::context::repo_root_or_cwd(cwd).join(WORKSPACE_STATE_RELATIVE_PATH),
+        None => crate::path_util::repo_root_or_cwd(cwd).join(WORKSPACE_STATE_RELATIVE_PATH),
     }
 }
 

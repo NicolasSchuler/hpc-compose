@@ -40,7 +40,6 @@ pub(crate) fn quote_always_with_backslash_apostrophe(value: &str) -> String {
 /// unquoted; every other token is single-quoted with embedded apostrophes
 /// escaped using the existing backslash-apostrophe display sequence.
 #[must_use]
-#[allow(dead_code)]
 pub(crate) fn quote_if_needed_for_display(value: &str) -> String {
     if value
         .chars()

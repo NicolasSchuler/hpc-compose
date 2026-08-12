@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use hpc_compose::cli::NotebookCommands;
 use hpc_compose::job::{SubmissionKind, SubmissionRecord};
 use serde_norway::{Mapping, Value};
 
@@ -11,7 +12,7 @@ const NOTEBOOK_CONTAINER_DIR: &str = "/hpc-compose/notebook-promote";
 const REQUIREMENTS_CONTAINER_PATH: &str = "/hpc-compose/prepare/requirements.txt";
 
 #[derive(Debug, Clone)]
-pub(crate) struct PromoteArgs {
+struct PromoteArgs {
     pub(crate) notebook: PathBuf,
     pub(crate) record: Option<PathBuf>,
     pub(crate) output: Option<PathBuf>,
@@ -24,7 +25,38 @@ pub(crate) struct PromoteArgs {
     pub(crate) params: Vec<String>,
 }
 
-pub(crate) fn promote(args: PromoteArgs, quiet: bool) -> Result<()> {
+pub(crate) fn run(command: NotebookCommands, quiet: bool) -> Result<()> {
+    match command {
+        NotebookCommands::Promote {
+            notebook,
+            record,
+            output,
+            force,
+            image,
+            volumes,
+            working_dir,
+            requirements,
+            prepare_commands,
+            params,
+        } => promote(
+            PromoteArgs {
+                notebook,
+                record,
+                output,
+                force,
+                image,
+                volumes,
+                working_dir,
+                requirements,
+                prepare_commands,
+                params,
+            },
+            quiet,
+        ),
+    }
+}
+
+fn promote(args: PromoteArgs, quiet: bool) -> Result<()> {
     let notebook = crate::path_util::absolute_path_cwd(&args.notebook)
         .with_context(|| format!("failed to resolve {}", args.notebook.display()))?;
     if !notebook.is_file() {

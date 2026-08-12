@@ -1664,7 +1664,7 @@ pub(crate) fn is_terminal_state(state: &str) -> bool {
     JobState::parse(state).is_terminal()
 }
 
-pub(crate) fn cancel_job(job_id: &str, scancel_bin: &str) -> Result<()> {
+pub(crate) fn cancel_job(job_id: &str, scancel_bin: &str) -> Result<String> {
     let output = Command::new(scancel_bin)
         .arg(job_id)
         .output()
@@ -1680,11 +1680,7 @@ pub(crate) fn cancel_job(job_id: &str, scancel_bin: &str) -> Result<()> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !stdout.is_empty() {
-        println!("{stdout}");
-    }
-    println!("cancelled job: {job_id}");
-    Ok(())
+    Ok(stdout)
 }
 
 #[cfg(test)]

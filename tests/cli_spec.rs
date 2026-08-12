@@ -666,6 +666,10 @@ services:
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
+        stdout.contains("x-slurm.mem='256M' gives less than 512 MiB per requested CPU (128.0 MiB)"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
         stdout.contains("HPC003"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
@@ -2495,6 +2499,73 @@ fn schema_command_emits_checked_in_schema() {
         format!("{checked_in}\n")
     };
     assert_eq!(stdout, expected);
+}
+
+#[test]
+fn schema_output_precedes_kind_and_ignores_context_options() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let missing_settings = tmpdir.path().join("missing-settings.toml");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "--offline",
+            "--settings-file",
+            missing_settings.to_str().expect("settings path"),
+            "--profile",
+            "missing-profile",
+            "schema",
+            "--kind",
+            "settings",
+            "--output",
+            "status",
+        ],
+    );
+
+    assert_success(&output);
+    assert!(output.stderr.is_empty());
+    let checked_in = fs::read_to_string(repo_root().join("schema/outputs/status.schema.json"))
+        .expect("checked-in status output schema");
+    let expected = if checked_in.ends_with('\n') {
+        checked_in
+    } else {
+        format!("{checked_in}\n")
+    };
+    assert_eq!(output.stdout, expected.as_bytes());
+}
+
+#[test]
+fn schema_unknown_output_preserves_exact_registry_order_diagnostic() {
+    let output = run_cli(
+        &repo_root(),
+        &["schema", "--output", "definitely-not-a-command"],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        stderr_text(&output),
+        concat!(
+            "hpc_compose::error\n",
+            "\n",
+            "  × unknown output schema 'definitely-not-a-command'; known commands: score,\n",
+            "  │ jobs-list, status, ps, stats, artifacts, diff, diff-matrix, diff-spec,\n",
+            "  │ replay, clean, checkpoints, rendezvous-prune, prepare, preflight, doctor,\n",
+            "  │ rightsize, evolve, weather, validate, render, cache-inspect, cache-prune,\n",
+            "  │ up, cancel, dependencies, setup, init-describe, init-write, metrics-probe,\n",
+            "  │ rendezvous-resolve, rendezvous-list, cache-list, spec-config, spec-\n",
+            "  │ inspect, sweep-submit, sweep-status, sweep-list, sweep-observe, sweep-\n",
+            "  │ stop, sweep-results, sweep-score, sweep-stats, doctor-mpi-smoke, doctor-\n",
+            "  │ fabric-smoke, doctor-readiness, doctor-cluster-report, docs, feedback,\n",
+            "  │ diagnostic-notice, experiment, experiment-bundle, experiment-tag,\n",
+            "  │ experiment-note, germinate, when, test, pull, reach, notebook-dry-run,\n",
+            "  │ notebook, debug, rendezvous-register, explain, lint, plan, context,\n",
+            "  │ workspace-status, workspace-allocate, workspace-extend, workspace-release,\n",
+            "  │ lessons-list, lessons-describe, examples-list, examples-recommend, vars,\n",
+            "  │ init-list\n",
+            "\n",
+        )
+    );
 }
 
 #[test]

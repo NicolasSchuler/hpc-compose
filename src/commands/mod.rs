@@ -1,14 +1,12 @@
 use std::env;
 use std::ffi::OsString;
-use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use hpc_compose::cli::{
-    CacheCommands, Cli, Commands, CompletionValueKind, DoctorCommands, ExamplesCommands,
-    ExperimentCommands, JobsCommands, NotebookCommands, OutputFormat, RendezvousCommands,
-    SchemaKind, SweepCommands, WorkspaceCommands,
+    CacheCommands, Cli, Commands, CompletionValueKind, DoctorCommands, ExperimentCommands,
+    JobsCommands, NotebookCommands, OutputFormat, SweepCommands,
 };
 use hpc_compose::context::{
     BinaryOverrides, ResolveRequest, ResolvedContext, resolve, resolve_binaries_only,
@@ -490,7 +488,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
             spec::config(context, format, variables, show_values)
         }
-        Commands::Schema { kind, output } => print_schema(kind, output),
+        Commands::Schema { kind, output } => spec::schema(kind, output),
         Commands::Plan {
             file,
             strict_env,
@@ -625,7 +623,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 }
             }
         }
-        Commands::Examples { command } => run_examples_subcommand(command),
+        Commands::Examples { command } => examples::run(command),
         Commands::Docs {
             query,
             limit,
@@ -1783,101 +1781,17 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             until,
             format,
         ),
-        Commands::Rendezvous { command } => match command {
-            RendezvousCommands::Register {
-                name,
-                host,
-                port,
-                job_id,
-                service,
-                protocol,
-                path,
-                ttl_seconds,
-                cache_dir,
-                format,
-            } => {
-                let cache_dir = match cache_dir {
-                    Some(path) => path,
-                    None => {
-                        let context = resolve_command_context(
-                            options,
-                            None,
-                            BinaryOverrides::default(),
-                            None,
-                        )?;
-                        context.cache_dir.value
-                    }
-                };
-                let job_id = job_id
-                    .or_else(|| env::var("SLURM_JOB_ID").ok())
-                    .ok_or_else(|| {
-                        hpc_compose::exit::UsageError::new(
-                            "rendezvous register requires --job-id outside a Slurm job",
-                        )
-                    })?;
-                runtime::rendezvous_register(
-                    cache_dir,
-                    name,
-                    job_id,
-                    service,
-                    host,
-                    port,
-                    protocol,
-                    path,
-                    ttl_seconds,
-                    format,
-                )
-            }
-            RendezvousCommands::Resolve {
-                name,
-                cache_dir,
-                format,
-            } => {
-                let cache_dir = match cache_dir {
-                    Some(path) => path,
-                    None => {
-                        let context = resolve_command_context(
-                            options,
-                            None,
-                            BinaryOverrides::default(),
-                            None,
-                        )?;
-                        context.cache_dir.value
-                    }
-                };
-                runtime::rendezvous_resolve(cache_dir, name, format)
-            }
-            RendezvousCommands::List { cache_dir, format } => {
-                let cache_dir = match cache_dir {
-                    Some(path) => path,
-                    None => {
-                        let context = resolve_command_context(
-                            options,
-                            None,
-                            BinaryOverrides::default(),
-                            None,
-                        )?;
-                        context.cache_dir.value
-                    }
-                };
-                runtime::rendezvous_list(cache_dir, format)
-            }
-            RendezvousCommands::Prune { cache_dir, format } => {
-                let cache_dir = match cache_dir {
-                    Some(path) => path,
-                    None => {
-                        let context = resolve_command_context(
-                            options,
-                            None,
-                            BinaryOverrides::default(),
-                            None,
-                        )?;
-                        context.cache_dir.value
-                    }
-                };
-                runtime::rendezvous_prune(cache_dir, format)
-            }
-        },
+        Commands::Rendezvous { command } => {
+            let cache_dir = match runtime::rendezvous_cmd::explicit_cache_dir(&command) {
+                Some(path) => path.to_path_buf(),
+                None => {
+                    let context =
+                        resolve_command_context(options, None, BinaryOverrides::default(), None)?;
+                    context.cache_dir.value
+                }
+            };
+            runtime::rendezvous_cmd::run(command, cache_dir)
+        }
         Commands::Cache { command } => match command {
             CacheCommands::List { cache_dir, format } => {
                 let cache_dir = match cache_dir {
@@ -1948,36 +1862,10 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
                 }
             }
         },
-        Commands::Workspace { command } => match command {
-            WorkspaceCommands::Status { tools, format } => {
-                let context =
-                    resolve_command_context(options, None, BinaryOverrides::default(), None)?;
-                workspace::status(context, &tools, format)
-            }
-            WorkspaceCommands::Allocate {
-                duration_days,
-                tools,
-                format,
-            } => {
-                let context =
-                    resolve_command_context(options, None, BinaryOverrides::default(), None)?;
-                workspace::allocate(context, duration_days, &tools, format)
-            }
-            WorkspaceCommands::Extend {
-                days,
-                tools,
-                format,
-            } => {
-                let context =
-                    resolve_command_context(options, None, BinaryOverrides::default(), None)?;
-                workspace::extend(context, days, &tools, format)
-            }
-            WorkspaceCommands::Release { yes, tools, format } => {
-                let context =
-                    resolve_command_context(options, None, BinaryOverrides::default(), None)?;
-                workspace::release(context, yes, &tools, format)
-            }
-        },
+        Commands::Workspace { command } => {
+            let context = resolve_command_context(options, None, BinaryOverrides::default(), None)?;
+            workspace::run(context, command)
+        }
         Commands::Jobs { command } => match command {
             JobsCommands::List {
                 disk_usage,
@@ -2082,34 +1970,8 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             sacct_bin,
             format,
         } => {
-            if let Some(NotebookCommands::Promote {
-                notebook,
-                record,
-                output,
-                force,
-                image,
-                volumes,
-                working_dir,
-                requirements,
-                prepare_commands,
-                params,
-            }) = command
-            {
-                return runtime::notebook_promote::promote(
-                    runtime::notebook_promote::PromoteArgs {
-                        notebook,
-                        record,
-                        output,
-                        force,
-                        image,
-                        volumes,
-                        working_dir,
-                        requirements,
-                        prepare_commands,
-                        params,
-                    },
-                    options.quiet,
-                );
+            if let Some(command) = command {
+                return runtime::notebook_promote::run(command, options.quiet);
             }
             use hpc_compose::cli::NotebookKindArg;
             use hpc_compose::spec::parse_short_duration;
@@ -2456,20 +2318,6 @@ fn parse_doctor_timeout(raw: &str) -> Result<u64> {
         .with_context(|| format!("doctor --timeout '{raw}' must be like 30s or 5m"))
 }
 
-fn run_examples_subcommand(command: ExamplesCommands) -> Result<()> {
-    match command {
-        ExamplesCommands::List { tag, format } => examples::list(tag, format),
-        ExamplesCommands::Search { query, format } => examples::search(query, format),
-        ExamplesCommands::Recommend {
-            query,
-            tags,
-            limit,
-            format,
-        } => examples::recommend(query, tags, limit, format),
-        ExamplesCommands::Coverage { format } => examples::coverage(format),
-    }
-}
-
 fn resolve_command_context(
     options: &GlobalCommandOptions,
     compose_file: Option<PathBuf>,
@@ -2686,41 +2534,6 @@ fn resolve_binary_overrides(
     overrides
 }
 
-fn print_schema(kind: Option<SchemaKind>, output: Option<String>) -> Result<()> {
-    if let Some(command) = output {
-        let json = crate::output::contract::output_schema_json(&command).ok_or_else(|| {
-            anyhow::anyhow!(
-                "unknown output schema '{command}'; known commands: {}",
-                crate::output::contract::output_schema_commands().join(", ")
-            )
-        })?;
-        let mut stdout = io::stdout();
-        stdout
-            .write_all(json.as_bytes())
-            .context("failed to write output schema to stdout")?;
-        if !json.ends_with('\n') {
-            stdout
-                .write_all(b"\n")
-                .context("failed to write output schema newline to stdout")?;
-        }
-        return Ok(());
-    }
-    let json = match kind {
-        Some(SchemaKind::Settings) => hpc_compose::schema::settings_schema_json(),
-        _ => hpc_compose::schema::schema_json(),
-    };
-    let mut stdout = io::stdout();
-    stdout
-        .write_all(json.as_bytes())
-        .context("failed to write schema to stdout")?;
-    if !json.ends_with('\n') {
-        stdout
-            .write_all(b"\n")
-            .context("failed to write schema newline to stdout")?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2873,31 +2686,33 @@ mod tests {
 
     #[test]
     fn run_cli_dispatches_jobs_list() {
-        run_cli(
-            Cli {
-                color: hpc_compose::cli::ColorPolicy::Auto,
-                quiet: false,
-                verbose: 0,
-                debug: false,
-                offline: false,
-                profile: None,
-                settings_file: None,
-                command: Commands::Jobs {
-                    command: JobsCommands::List {
-                        disk_usage: false,
-                        tag: Vec::new(),
-                        format: Some(hpc_compose::cli::OutputFormat::Json),
+        hpc_compose::term::with_test_color_policy(hpc_compose::cli::ColorPolicy::Auto, || {
+            run_cli(
+                Cli {
+                    color: hpc_compose::cli::ColorPolicy::Auto,
+                    quiet: false,
+                    verbose: 0,
+                    debug: false,
+                    offline: false,
+                    profile: None,
+                    settings_file: None,
+                    command: Commands::Jobs {
+                        command: JobsCommands::List {
+                            disk_usage: false,
+                            tag: Vec::new(),
+                            format: Some(hpc_compose::cli::OutputFormat::Json),
+                        },
                     },
                 },
-            },
-            &[
-                OsString::from("hpc-compose"),
-                OsString::from("jobs"),
-                OsString::from("list"),
-                OsString::from("--format"),
-                OsString::from("json"),
-            ],
-        )
+                &[
+                    OsString::from("hpc-compose"),
+                    OsString::from("jobs"),
+                    OsString::from("list"),
+                    OsString::from("--format"),
+                    OsString::from("json"),
+                ],
+            )
+        })
         .expect("run cli jobs list");
     }
 
@@ -2913,41 +2728,44 @@ mod tests {
             "name: dispatch-test\nx-slurm:\n  time: \"00:10:00\"\nservices:\n  app:\n    image: docker://python:3.12\n    command: [\"true\"]\n",
         )
         .expect("write compose");
-        let err = run_cli(
-            Cli {
-                color: hpc_compose::cli::ColorPolicy::Auto,
-                quiet: false,
-                verbose: 0,
-                debug: false,
-                offline: false,
-                profile: None,
-                settings_file: None,
-                command: Commands::Experiment {
-                    command: ExperimentCommands::Show {
-                        job_id: Some("99999".to_string()),
-                        file: Some(compose.clone()),
-                        format: Some(hpc_compose::cli::OutputFormat::Json),
-                        pue: 1.20,
-                        gpu_tdp_w: 300.0,
-                        cpu_watts_per_core: 8.0,
-                        sstat_bin: "sstat".to_string(),
-                        squeue_bin: "squeue".to_string(),
-                        sacct_bin: "sacct".to_string(),
+        let err =
+            hpc_compose::term::with_test_color_policy(hpc_compose::cli::ColorPolicy::Auto, || {
+                run_cli(
+                    Cli {
+                        color: hpc_compose::cli::ColorPolicy::Auto,
+                        quiet: false,
+                        verbose: 0,
+                        debug: false,
+                        offline: false,
+                        profile: None,
+                        settings_file: None,
+                        command: Commands::Experiment {
+                            command: ExperimentCommands::Show {
+                                job_id: Some("99999".to_string()),
+                                file: Some(compose.clone()),
+                                format: Some(hpc_compose::cli::OutputFormat::Json),
+                                pue: 1.20,
+                                gpu_tdp_w: 300.0,
+                                cpu_watts_per_core: 8.0,
+                                sstat_bin: "sstat".to_string(),
+                                squeue_bin: "squeue".to_string(),
+                                sacct_bin: "sacct".to_string(),
+                            },
+                        },
                     },
-                },
-            },
-            &[
-                OsString::from("hpc-compose"),
-                OsString::from("experiment"),
-                OsString::from("show"),
-                OsString::from("99999"),
-                OsString::from("-f"),
-                OsString::from(compose.as_os_str()),
-                OsString::from("--format"),
-                OsString::from("json"),
-            ],
-        )
-        .expect_err("unknown tracked job should error");
+                    &[
+                        OsString::from("hpc-compose"),
+                        OsString::from("experiment"),
+                        OsString::from("show"),
+                        OsString::from("99999"),
+                        OsString::from("-f"),
+                        OsString::from(compose.as_os_str()),
+                        OsString::from("--format"),
+                        OsString::from("json"),
+                    ],
+                )
+            })
+            .expect_err("unknown tracked job should error");
         assert!(
             err.to_string().contains("was not found"),
             "expected tracked-job hint, got: {err}"
@@ -2967,42 +2785,45 @@ mod tests {
             "name: dispatch-test\nx-slurm:\n  time: \"00:10:00\"\nservices:\n  app:\n    image: docker://python:3.12\n    command: [\"true\"]\n",
         )
         .expect("write compose");
-        let err = run_cli(
-            Cli {
-                color: hpc_compose::cli::ColorPolicy::Auto,
-                quiet: false,
-                verbose: 0,
-                debug: false,
-                offline: false,
-                profile: None,
-                settings_file: None,
-                command: Commands::Experiment {
-                    command: ExperimentCommands::Bundle {
-                        job_id: Some("99999".to_string()),
-                        file: Some(compose.clone()),
-                        into: out.clone(),
-                        tarball: true,
-                        include_artifacts: false,
-                        bundles: Vec::new(),
-                        format: Some(hpc_compose::cli::OutputFormat::Json),
+        let err =
+            hpc_compose::term::with_test_color_policy(hpc_compose::cli::ColorPolicy::Auto, || {
+                run_cli(
+                    Cli {
+                        color: hpc_compose::cli::ColorPolicy::Auto,
+                        quiet: false,
+                        verbose: 0,
+                        debug: false,
+                        offline: false,
+                        profile: None,
+                        settings_file: None,
+                        command: Commands::Experiment {
+                            command: ExperimentCommands::Bundle {
+                                job_id: Some("99999".to_string()),
+                                file: Some(compose.clone()),
+                                into: out.clone(),
+                                tarball: true,
+                                include_artifacts: false,
+                                bundles: Vec::new(),
+                                format: Some(hpc_compose::cli::OutputFormat::Json),
+                            },
+                        },
                     },
-                },
-            },
-            &[
-                OsString::from("hpc-compose"),
-                OsString::from("experiment"),
-                OsString::from("bundle"),
-                OsString::from("99999"),
-                OsString::from("-f"),
-                OsString::from(compose.as_os_str()),
-                OsString::from("--into"),
-                OsString::from(out.as_os_str()),
-                OsString::from("--tarball"),
-                OsString::from("--format"),
-                OsString::from("json"),
-            ],
-        )
-        .expect_err("unknown tracked job should error");
+                    &[
+                        OsString::from("hpc-compose"),
+                        OsString::from("experiment"),
+                        OsString::from("bundle"),
+                        OsString::from("99999"),
+                        OsString::from("-f"),
+                        OsString::from(compose.as_os_str()),
+                        OsString::from("--into"),
+                        OsString::from(out.as_os_str()),
+                        OsString::from("--tarball"),
+                        OsString::from("--format"),
+                        OsString::from("json"),
+                    ],
+                )
+            })
+            .expect_err("unknown tracked job should error");
         assert!(
             err.to_string().contains("was not found"),
             "expected tracked-job hint, got: {err}"

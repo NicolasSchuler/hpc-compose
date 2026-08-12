@@ -6,45 +6,11 @@ use hpc_compose::cli::OutputFormat;
 use hpc_compose::context::{BinaryOverrides, ResolveRequest, ResolvedContext, resolve};
 use hpc_compose::job::{SchedulerOptions, build_ps_snapshot, build_status_snapshot};
 use hpc_compose::preflight::{Options as PreflightOptions, run as run_preflight};
-use serde::Serialize;
 
 use super::{load_discovered_cluster_profile, resolve_tracked_record};
 use crate::commands::load;
 use crate::output;
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-struct DebugLogTail {
-    service_name: Option<String>,
-    path: PathBuf,
-    present: bool,
-    lines: Vec<String>,
-    note: Option<String>,
-}
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-struct DebugSummary {
-    scheduler_state: Option<String>,
-    failed_service: Option<String>,
-    exit_code: Option<i64>,
-    log_path: Option<PathBuf>,
-    next_command: String,
-}
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct DebugReport {
-    pub(crate) schema_version: u32,
-    tracked: bool,
-    compose_file: PathBuf,
-    job_id: Option<String>,
-    summary: DebugSummary,
-    status: Option<hpc_compose::job::StatusSnapshot>,
-    ps: Option<hpc_compose::job::PsSnapshot>,
-    batch_log: Option<DebugLogTail>,
-    service_logs: Vec<DebugLogTail>,
-    notes: Vec<String>,
-    recommendation: String,
-    preflight: Option<serde_json::Value>,
-}
+pub(crate) use crate::output::runtime::{DebugLogTail, DebugReport, DebugSummary};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn debug(
@@ -431,5 +397,70 @@ fn debug_recommendation(
             compose_file.display(),
             compose_file.display()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_report_preserves_exact_pretty_json_bytes() {
+        let report = DebugReport {
+            schema_version: 1,
+            tracked: false,
+            compose_file: PathBuf::from("compose.yaml"),
+            job_id: None,
+            summary: DebugSummary {
+                scheduler_state: None,
+                failed_service: None,
+                exit_code: None,
+                log_path: None,
+                next_command: "hpc-compose up -f compose.yaml".to_string(),
+            },
+            status: None,
+            ps: None,
+            batch_log: Some(DebugLogTail {
+                service_name: None,
+                path: PathBuf::from("logs/batch.log"),
+                present: false,
+                lines: Vec::new(),
+                note: Some("batch log missing".to_string()),
+            }),
+            service_logs: Vec::new(),
+            notes: Vec::new(),
+            recommendation: "run plan first".to_string(),
+            preflight: None,
+        };
+
+        let actual = crate::output::to_pretty_json(&report).expect("serialize debug fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "tracked": false,
+  "compose_file": "compose.yaml",
+  "job_id": null,
+  "summary": {
+    "scheduler_state": null,
+    "failed_service": null,
+    "exit_code": null,
+    "log_path": null,
+    "next_command": "hpc-compose up -f compose.yaml"
+  },
+  "status": null,
+  "ps": null,
+  "batch_log": {
+    "service_name": null,
+    "path": "logs/batch.log",
+    "present": false,
+    "lines": [],
+    "note": "batch log missing"
+  },
+  "service_logs": [],
+  "notes": [],
+  "recommendation": "run plan first",
+  "preflight": null
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
     }
 }

@@ -1,7 +1,6 @@
 //! Cache manifest management for imported and prepared image artifacts.
 
 pub mod dataset;
-#[allow(dead_code)]
 pub(crate) mod observation;
 pub mod source;
 

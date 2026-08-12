@@ -378,6 +378,108 @@ fn rendezvous_cli_register_resolve_list_and_prune_round_trip() {
 }
 
 #[test]
+fn rendezvous_explicit_cache_skips_broken_settings_and_profile() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let missing_settings = tmpdir.path().join("missing-settings.toml");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "--settings-file",
+            missing_settings.to_str().expect("path"),
+            "--profile",
+            "missing",
+            "rendezvous",
+            "list",
+            "--cache-dir",
+            cache_root.path().to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_success(&output);
+    assert_eq!(stdout_text(&output), "[]\n");
+    assert_eq!(stderr_text(&output), "");
+}
+
+#[test]
+fn rendezvous_omitted_cache_uses_profile_fallback() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache_root = safe_cache_dir();
+    let settings = tmpdir.path().join("settings.toml");
+    fs::write(
+        &settings,
+        format!(
+            r#"version = 1
+default_profile = "dev"
+
+[profiles.dev.cache]
+dir = "{}"
+"#,
+            cache_root.path().display()
+        ),
+    )
+    .expect("settings");
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "--settings-file",
+            settings.to_str().expect("path"),
+            "--profile",
+            "dev",
+            "rendezvous",
+            "list",
+        ],
+    );
+
+    assert_success(&output);
+    assert_eq!(
+        stdout_text(&output),
+        format!(
+            "no live rendezvous records found under {}\n",
+            hpc_compose::rendezvous::root_dir(cache_root.path()).display()
+        )
+    );
+    assert_eq!(stderr_text(&output), "");
+}
+
+#[test]
+fn rendezvous_broken_context_precedes_missing_register_job_id() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let missing_settings = "missing-settings.toml";
+
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "--settings-file",
+            missing_settings,
+            "--profile",
+            "missing",
+            "rendezvous",
+            "register",
+            "model-server",
+            "--host",
+            "node01",
+            "--port",
+            "8000",
+        ],
+    );
+
+    assert_failure(&output);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout_text(&output), "");
+    let stderr = stderr_text(&output);
+    assert!(
+        stderr.contains(&format!("settings file does not exist: {missing_settings}")),
+        "unexpected stderr:\n{stderr}"
+    );
+    assert!(!stderr.contains("requires --job-id outside a Slurm job"));
+}
+
+#[test]
 fn rendezvous_register_uses_slurm_job_id_env_when_job_id_omitted() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
@@ -433,6 +535,12 @@ fn rendezvous_register_rejects_invalid_inputs_without_writing_records() {
     for (args, expected) in [
         (
             vec![
+                "..", "--host", "node01", "--port", "8000", "--job-id", "4242",
+            ],
+            "rendezvous name must not be '.' or '..'",
+        ),
+        (
+            vec![
                 "bad/name", "--host", "node01", "--port", "8000", "--job-id", "4242",
             ],
             "rendezvous name must contain only ASCII letters",
@@ -478,6 +586,8 @@ fn rendezvous_register_rejects_invalid_inputs_without_writing_records() {
     }
 
     assert!(!hpc_compose::rendezvous::root_dir(&cache_dir).exists());
+    assert!(!cache_dir.join("latest.json").exists());
+    assert!(!cache_dir.join("4242-manual.json").exists());
 }
 
 #[test]

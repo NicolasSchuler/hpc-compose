@@ -336,6 +336,25 @@ fn valid_candidate(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    struct CurrentDirReset(PathBuf);
+
+    impl Drop for CurrentDirReset {
+        fn drop(&mut self) {
+            let _ = env::set_current_dir(&self.0);
+        }
+    }
+
+    fn write_test_cluster_profile(root: &Path, name: &str) -> PathBuf {
+        let path = root.join(hpc_compose::cluster::CLUSTER_PROFILE_RELATIVE_PATH);
+        fs::create_dir_all(path.parent().expect("profile parent")).expect("create profile parent");
+        fs::write(
+            &path,
+            format!("schema_version = 1\n[site]\nname = \"{name}\"\n"),
+        )
+        .expect("write cluster profile");
+        path
+    }
+
     #[test]
     fn write_candidates_sorts_deduplicates_and_prefix_filters() {
         let candidates =
@@ -370,6 +389,48 @@ services:
         assert_eq!(
             candidates,
             BTreeSet::from(["trainer".to_string(), "worker".to_string()])
+        );
+    }
+
+    #[test]
+    fn cluster_profile_completion_preserves_context_file_cwd_precedence_and_fails_quietly() {
+        let _env_guard = crate::test_support::env_lock().lock().expect("env lock");
+        let original_cwd = env::current_dir().expect("current directory");
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cwd_root = tmpdir.path().join("cwd");
+        let file_root = tmpdir.path().join("file");
+        let context_root = tmpdir.path().join("context");
+        for root in [&cwd_root, &file_root, &context_root] {
+            fs::create_dir_all(root).expect("create lookup root");
+        }
+        write_test_cluster_profile(&cwd_root, "cwd");
+        write_test_cluster_profile(&file_root, "file");
+        let context_profile_path = write_test_cluster_profile(&context_root, "context");
+        let explicit_file = file_root.join("compose.yaml");
+        let context_file = context_root.join("compose.yaml");
+        let compose = "services:\n  app:\n    image: alpine\n";
+        fs::write(&explicit_file, compose).expect("write explicit compose");
+        fs::write(&context_file, compose).expect("write context compose");
+
+        env::set_current_dir(&cwd_root).expect("set current directory");
+        let _cwd_reset = CurrentDirReset(original_cwd);
+        let context =
+            resolve_context_quiet(&GlobalCommandOptions::default(), Some(context_file.clone()))
+                .expect("resolve context");
+
+        let from_context = load_cluster_profile_quiet(Some(&context), Some(&explicit_file))
+            .expect("context profile");
+        let from_file =
+            load_cluster_profile_quiet(None, Some(&explicit_file)).expect("explicit file profile");
+        let from_cwd = load_cluster_profile_quiet(None, None).expect("cwd profile");
+        assert_eq!(from_context.site.name.as_deref(), Some("context"));
+        assert_eq!(from_file.site.name.as_deref(), Some("file"));
+        assert_eq!(from_cwd.site.name.as_deref(), Some("cwd"));
+
+        fs::write(&context_profile_path, "schema_version = [\n").expect("corrupt context profile");
+        assert!(
+            load_cluster_profile_quiet(Some(&context), Some(&explicit_file)).is_none(),
+            "an invalid context-selected profile must fail quietly without falling back"
         );
     }
 }

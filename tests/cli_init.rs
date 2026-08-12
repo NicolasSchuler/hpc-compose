@@ -1012,6 +1012,33 @@ fn examples_commands_list_search_and_coverage() {
 }
 
 #[test]
+fn examples_list_json_ignores_missing_settings_and_profile_context() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let missing_settings = tmpdir.path().join("missing-settings.toml");
+
+    let baseline = run_cli(tmpdir.path(), &["examples", "list", "--format", "json"]);
+    let with_missing_context = run_cli(
+        tmpdir.path(),
+        &[
+            "--offline",
+            "--settings-file",
+            missing_settings.to_str().expect("path"),
+            "--profile",
+            "missing",
+            "examples",
+            "list",
+            "--format",
+            "json",
+        ],
+    );
+
+    assert_success(&baseline);
+    assert_eq!(with_missing_context.status, baseline.status);
+    assert_eq!(with_missing_context.stdout, baseline.stdout);
+    assert_eq!(with_missing_context.stderr, baseline.stderr);
+}
+
+#[test]
 fn doctor_mpi_smoke_renders_and_requires_explicit_submit() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();

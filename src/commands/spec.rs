@@ -1,9 +1,9 @@
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use hpc_compose::cli::{DependencyOutputFormat, OutputFormat};
-use hpc_compose::cluster::{discover_cluster_profile_path, load_cluster_profile};
+use hpc_compose::cli::{DependencyOutputFormat, OutputFormat, SchemaKind};
 use hpc_compose::context::{ResolvedContext, ResolvedValue, ValueSource};
 use hpc_compose::job::{
     SchedulerOptions, StatsOptions, build_rightsize_report, jobs_dir_for, load_submission_record,
@@ -20,11 +20,49 @@ use hpc_compose::render::{
 use hpc_compose::runtime_plan::{RuntimePlan, build_runtime_plan};
 use hpc_compose::spec::{missing_defaulted_variables, referenced_variables};
 use hpc_compose::term;
-use serde::Serialize;
 
 use crate::commands::load;
+pub(crate) use crate::output::spec::{
+    ContextOutput, ContextRuntimePaths, ExplainEntry, ExplainOutput, LintOutput, PlanHint,
+    PlanOutput,
+};
 use crate::output::{self, common as output_common, spec as output_spec};
 use crate::progress::{PrepareProgress, ProgressReporter};
+
+pub(crate) fn schema(kind: Option<SchemaKind>, output: Option<String>) -> Result<()> {
+    if let Some(command) = output {
+        let json = crate::output::contract::output_schema_json(&command).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown output schema '{command}'; known commands: {}",
+                crate::output::contract::output_schema_commands().join(", ")
+            )
+        })?;
+        let mut stdout = io::stdout();
+        stdout
+            .write_all(json.as_bytes())
+            .context("failed to write output schema to stdout")?;
+        if !json.ends_with('\n') {
+            stdout
+                .write_all(b"\n")
+                .context("failed to write output schema newline to stdout")?;
+        }
+        return Ok(());
+    }
+    let json = match kind {
+        Some(SchemaKind::Settings) => hpc_compose::schema::settings_schema_json(),
+        _ => hpc_compose::schema::schema_json(),
+    };
+    let mut stdout = io::stdout();
+    stdout
+        .write_all(json.as_bytes())
+        .context("failed to write schema to stdout")?;
+    if !json.ends_with('\n') {
+        stdout
+            .write_all(b"\n")
+            .context("failed to write schema newline to stdout")?;
+    }
+    Ok(())
+}
 
 pub(crate) fn validate(
     context: ResolvedContext,
@@ -79,19 +117,6 @@ pub(crate) fn validate(
         }
     }
     Ok(())
-}
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct LintOutput {
-    pub(crate) schema_version: u32,
-    passed: bool,
-    compose_file: PathBuf,
-    warning_count: usize,
-    error_count: usize,
-    fixable_count: usize,
-    findings: Vec<LintFinding>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    applied_fixes: Vec<AppliedFix>,
 }
 
 pub(crate) fn lint(
@@ -364,23 +389,6 @@ pub(crate) fn render(
     Ok(())
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct PlanOutput {
-    pub(crate) schema_version: u32,
-    valid: bool,
-    compose_file: PathBuf,
-    runtime_plan: hpc_compose::runtime_plan::RuntimePlan,
-    cluster_warnings: Vec<String>,
-    explanations: Vec<PlanHint>,
-    script: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-struct PlanHint {
-    level: &'static str,
-    message: String,
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn plan(
     context: ResolvedContext,
@@ -593,34 +601,6 @@ fn print_plan_hints(hints: &[PlanHint]) {
         };
         println!("- {label}: {}", hint.message);
     }
-}
-
-/// `explain --format json` output: the provenance entries selected by the
-/// query (or the full map when no query is given).
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct ExplainOutput {
-    pub(crate) schema_version: u32,
-    compose_file: PathBuf,
-    entries: Vec<ExplainEntry>,
-}
-
-/// One provenance span: a spec field and the preview-script line range it
-/// produced.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-struct ExplainEntry {
-    /// Spec path that produced the lines, e.g. `x-slurm.mem` or
-    /// `services.app.readiness.tcp`.
-    source: String,
-    /// Feature-block section name for banner-level entries, e.g.
-    /// `artifact helpers`.
-    section: Option<String>,
-    /// First script line of the span (1-based, inclusive).
-    start_line: usize,
-    /// Last script line of the span (1-based, inclusive).
-    end_line: usize,
-    /// The matching script lines, secret-redacted. Empty in full-map mode,
-    /// which reports line ranges without echoing contents.
-    lines: Vec<String>,
 }
 
 pub(crate) fn explain(
@@ -1135,37 +1115,6 @@ pub(crate) fn config(
     Ok(())
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-struct ContextRuntimePaths {
-    compose_dir: PathBuf,
-    current_submit_dir: PathBuf,
-    default_script_path: PathBuf,
-    runtime_job_root_pattern: String,
-    cache_dir: Option<ResolvedValue<PathBuf>>,
-    /// Resolved enroot prepare-time temporary scratch directory
-    /// (`ENROOT_TEMP_PATH`).
-    enroot_temp_dir: ResolvedValue<PathBuf>,
-    resume_dir: Option<ResolvedValue<PathBuf>>,
-    artifact_export_dir: Option<ResolvedValue<String>>,
-    metadata_root: ResolvedValue<PathBuf>,
-    jobs_dir: ResolvedValue<PathBuf>,
-}
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub(crate) struct ContextOutput {
-    pub(crate) schema_version: u32,
-    cwd: PathBuf,
-    settings_path: Option<PathBuf>,
-    settings_base_dir: Option<PathBuf>,
-    selected_profile: Option<String>,
-    compose_file: ResolvedValue<PathBuf>,
-    binaries: hpc_compose::context::ResolvedBinaries,
-    interpolation_vars: std::collections::BTreeMap<String, String>,
-    interpolation_var_sources: std::collections::BTreeMap<String, ValueSource>,
-    compose_load_error: Option<String>,
-    runtime_paths: ContextRuntimePaths,
-}
-
 /// Resolves the enroot prepare temp dir for display, tracking which layer won.
 fn resolve_enroot_temp_display(
     spec_value: Option<&str>,
@@ -1245,7 +1194,7 @@ pub(crate) fn context(
     let runtime_paths = ContextRuntimePaths {
         compose_dir: compose_dir.clone(),
         current_submit_dir: current_submit_dir.clone(),
-        default_script_path: output_common::default_script_path(&context.compose_file.value),
+        default_script_path: crate::path_util::default_script_path(&context.compose_file.value),
         runtime_job_root_pattern: current_submit_dir
             .join(crate::tracked_paths::METADATA_DIR_NAME)
             .join("{job_id}")
@@ -1501,7 +1450,7 @@ fn scoped_interpolation_vars(
     std::collections::BTreeMap<String, String>,
     std::collections::BTreeMap<String, ValueSource>,
 ) {
-    let secret_values = crate::redaction::secret_value_set(vars, sources);
+    let secret_values = crate::context::secret_value_set(vars, sources);
     let mut scoped_vars = std::collections::BTreeMap::new();
     let mut scoped_sources = std::collections::BTreeMap::new();
     for key in referenced {
@@ -1525,10 +1474,7 @@ fn load_discovered_cluster_profile(
         .value
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    let Some(path) = discover_cluster_profile_path(start) else {
-        return Ok(None);
-    };
-    Ok(Some(load_cluster_profile(&path)?))
+    hpc_compose::cluster::load_discovered_cluster_profile(start)
 }
 
 #[cfg(test)]
@@ -1541,6 +1487,227 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use hpc_compose::context::{ResolvedBinaries, ResolvedContext};
+
+    fn normalize_pretty_field(
+        document: &str,
+        field: &str,
+        nested_document: &str,
+        marker: &str,
+    ) -> String {
+        let mut lines = nested_document.lines();
+        let first = lines.next().expect("nested JSON has a first line");
+        let indented = std::iter::once(first.to_string())
+            .chain(lines.map(|line| format!("  {line}")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let needle = format!("  \"{field}\": {indented}");
+        assert!(document.contains(&needle), "missing nested field {field}");
+        document.replacen(&needle, &format!("  \"{field}\": \"{marker}\""), 1)
+    }
+
+    fn fixture_binaries() -> ResolvedBinaries {
+        let resolved = |value: &str| ResolvedValue {
+            value: value.to_string(),
+            source: ValueSource::Builtin,
+        };
+        ResolvedBinaries {
+            enroot: resolved("enroot"),
+            apptainer: resolved("apptainer"),
+            singularity: resolved("singularity"),
+            salloc: resolved("salloc"),
+            sbatch: resolved("sbatch"),
+            srun: resolved("srun"),
+            scontrol: resolved("scontrol"),
+            sinfo: resolved("sinfo"),
+            squeue: resolved("squeue"),
+            sacct: resolved("sacct"),
+            sstat: resolved("sstat"),
+            scancel: resolved("scancel"),
+            sshare: resolved("sshare"),
+            sprio: resolved("sprio"),
+            ssh: resolved("ssh"),
+            rsync: resolved("rsync"),
+        }
+    }
+
+    #[test]
+    fn spec_outputs_preserve_exact_pretty_json_bytes() {
+        let lint = LintOutput {
+            schema_version: 1,
+            passed: true,
+            compose_file: PathBuf::from("compose.yaml"),
+            warning_count: 0,
+            error_count: 0,
+            fixable_count: 0,
+            findings: Vec::new(),
+            applied_fixes: Vec::new(),
+        };
+        let actual = crate::output::to_pretty_json(&lint).expect("serialize lint fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "passed": true,
+  "compose_file": "compose.yaml",
+  "warning_count": 0,
+  "error_count": 0,
+  "fixable_count": 0,
+  "findings": []
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+
+        let runtime_plan = RuntimePlan {
+            name: "demo".to_string(),
+            cache_dir: PathBuf::from("cache"),
+            runtime: Default::default(),
+            slurm: Default::default(),
+            ordered_services: Vec::new(),
+        };
+        let runtime_plan_json =
+            crate::output::to_pretty_json(&runtime_plan).expect("serialize runtime plan fixture");
+        let plan = PlanOutput {
+            schema_version: 1,
+            valid: true,
+            compose_file: PathBuf::from("compose.yaml"),
+            runtime_plan,
+            cluster_warnings: Vec::new(),
+            explanations: vec![PlanHint {
+                level: "info",
+                message: "ready".to_string(),
+            }],
+            script: None,
+        };
+        let actual = crate::output::to_pretty_json(&plan).expect("serialize plan fixture");
+        assert!(!actual.ends_with('\n'));
+        let actual = normalize_pretty_field(
+            &actual,
+            "runtime_plan",
+            &runtime_plan_json,
+            "<runtime-plan>",
+        );
+        let expected = r#"{
+  "schema_version": 1,
+  "valid": true,
+  "compose_file": "compose.yaml",
+  "runtime_plan": "<runtime-plan>",
+  "cluster_warnings": [],
+  "explanations": [
+    {
+      "level": "info",
+      "message": "ready"
+    }
+  ],
+  "script": null
+}"#;
+        assert_eq!(actual, expected);
+
+        let explain = ExplainOutput {
+            schema_version: 1,
+            compose_file: PathBuf::from("compose.yaml"),
+            entries: vec![ExplainEntry {
+                source: "x-slurm.mem".to_string(),
+                section: None,
+                start_line: 3,
+                end_line: 4,
+                lines: Vec::new(),
+            }],
+        };
+        let actual = crate::output::to_pretty_json(&explain).expect("serialize explain fixture");
+        let expected = r#"{
+  "schema_version": 1,
+  "compose_file": "compose.yaml",
+  "entries": [
+    {
+      "source": "x-slurm.mem",
+      "section": null,
+      "start_line": 3,
+      "end_line": 4,
+      "lines": []
+    }
+  ]
+}"#;
+        assert_eq!(actual, expected);
+        assert!(!actual.ends_with('\n'));
+
+        let binaries = fixture_binaries();
+        let binaries_json =
+            crate::output::to_pretty_json(&binaries).expect("serialize binaries fixture");
+        let context = ContextOutput {
+            schema_version: 1,
+            cwd: PathBuf::from("workspace"),
+            settings_path: None,
+            settings_base_dir: None,
+            selected_profile: None,
+            compose_file: ResolvedValue {
+                value: PathBuf::from("compose.yaml"),
+                source: ValueSource::Cli,
+            },
+            binaries,
+            interpolation_vars: BTreeMap::new(),
+            interpolation_var_sources: BTreeMap::new(),
+            compose_load_error: None,
+            runtime_paths: ContextRuntimePaths {
+                compose_dir: PathBuf::from("."),
+                current_submit_dir: PathBuf::from("workspace"),
+                default_script_path: PathBuf::from("hpc-compose.sbatch"),
+                runtime_job_root_pattern: "workspace/.hpc-compose/{job_id}".to_string(),
+                cache_dir: None,
+                enroot_temp_dir: ResolvedValue {
+                    value: PathBuf::from("cache/enroot/tmp"),
+                    source: ValueSource::Builtin,
+                },
+                resume_dir: None,
+                artifact_export_dir: None,
+                metadata_root: ResolvedValue {
+                    value: PathBuf::from(".hpc-compose"),
+                    source: ValueSource::Builtin,
+                },
+                jobs_dir: ResolvedValue {
+                    value: PathBuf::from(".hpc-compose/jobs"),
+                    source: ValueSource::Builtin,
+                },
+            },
+        };
+        let actual = crate::output::to_pretty_json(&context).expect("serialize context fixture");
+        assert!(!actual.ends_with('\n'));
+        let actual = normalize_pretty_field(&actual, "binaries", &binaries_json, "<binaries>");
+        let expected = r#"{
+  "schema_version": 1,
+  "cwd": "workspace",
+  "settings_path": null,
+  "settings_base_dir": null,
+  "selected_profile": null,
+  "compose_file": {
+    "value": "compose.yaml",
+    "source": "cli"
+  },
+  "binaries": "<binaries>",
+  "interpolation_vars": {},
+  "interpolation_var_sources": {},
+  "compose_load_error": null,
+  "runtime_paths": {
+    "compose_dir": ".",
+    "current_submit_dir": "workspace",
+    "default_script_path": "hpc-compose.sbatch",
+    "runtime_job_root_pattern": "workspace/.hpc-compose/{job_id}",
+    "cache_dir": null,
+    "enroot_temp_dir": {
+      "value": "cache/enroot/tmp",
+      "source": "builtin"
+    },
+    "resume_dir": null,
+    "artifact_export_dir": null,
+    "metadata_root": {
+      "value": ".hpc-compose",
+      "source": "builtin"
+    },
+    "jobs_dir": {
+      "value": ".hpc-compose/jobs",
+      "source": "builtin"
+    }
+  }
+}"#;
+        assert_eq!(actual, expected);
+    }
 
     fn write_script(path: &std::path::Path, body: &str) {
         fs::write(path, body).expect("script");

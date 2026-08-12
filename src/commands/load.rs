@@ -20,20 +20,6 @@ pub(crate) fn load_plan(path: &Path) -> Result<Plan> {
     hpc_compose::planner::build_plan(path, spec)
 }
 
-#[allow(dead_code)]
-pub(crate) fn load_plan_with_interpolation_vars_and_cache_default(
-    path: &Path,
-    vars: &BTreeMap<String, String>,
-    cache_dir_default: Option<&Path>,
-) -> Result<Plan> {
-    load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
-        path,
-        vars,
-        cache_dir_default,
-        &BTreeMap::new(),
-    )
-}
-
 pub(crate) fn load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
     path: &Path,
     vars: &BTreeMap<String, String>,
@@ -55,16 +41,6 @@ pub(crate) fn load_plan_with_interpolation_vars_cache_default_and_resource_profi
 #[cfg(test)]
 pub(crate) fn load_runtime_plan(path: &Path) -> Result<RuntimePlan> {
     let plan = load_plan(path)?;
-    Ok(build_runtime_plan(&plan))
-}
-
-#[allow(dead_code)]
-pub(crate) fn load_runtime_plan_with_interpolation_vars_and_cache_default(
-    path: &Path,
-    vars: &BTreeMap<String, String>,
-    cache_dir_default: Option<&Path>,
-) -> Result<RuntimePlan> {
-    let plan = load_plan_with_interpolation_vars_and_cache_default(path, vars, cache_dir_default)?;
     Ok(build_runtime_plan(&plan))
 }
 
@@ -108,20 +84,6 @@ pub(crate) fn load_runtime_plan_from_effective_snapshot(
     Ok(build_runtime_plan(&plan))
 }
 
-#[allow(dead_code)]
-pub(crate) fn load_effective_config_with_interpolation_vars_and_cache_default(
-    path: &Path,
-    vars: &BTreeMap<String, String>,
-    cache_dir_default: Option<&Path>,
-) -> Result<EffectiveComposeConfig> {
-    load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
-        path,
-        vars,
-        cache_dir_default,
-        &BTreeMap::new(),
-    )
-}
-
 pub(crate) fn load_effective_config_with_interpolation_vars_cache_default_and_resource_profiles(
     path: &Path,
     vars: &BTreeMap<String, String>,
@@ -145,17 +107,6 @@ pub(crate) fn load_effective_config_with_interpolation_vars_cache_default_and_re
         .map(|service| (service.name.clone(), service.failure_policy.clone()))
         .collect::<BTreeMap<_, _>>();
     spec.effective_config(&plan.cache_dir, &normalized_policies)
-}
-
-#[allow(dead_code)]
-pub(crate) fn load_plan_and_runtime_with_interpolation_vars_and_cache_default(
-    path: &Path,
-    vars: &BTreeMap<String, String>,
-    cache_dir_default: Option<&Path>,
-) -> Result<(Plan, RuntimePlan)> {
-    let plan = load_plan_with_interpolation_vars_and_cache_default(path, vars, cache_dir_default)?;
-    let runtime_plan = build_runtime_plan(&plan);
-    Ok((plan, runtime_plan))
 }
 
 pub(crate) fn load_plan_and_runtime_with_interpolation_vars_cache_default_and_resource_profiles(

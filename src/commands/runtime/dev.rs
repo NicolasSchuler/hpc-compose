@@ -388,7 +388,7 @@ pub(crate) fn dev(
 
 fn shell_quote_for_tmux_command(value: &Path) -> String {
     let raw = value.to_string_lossy();
-    format!("'{}'", raw.replace('\'', "'\\''"))
+    crate::shell_quote::quote_always_with_backslash_apostrophe(&raw)
 }
 
 fn ensure_tmux_available(tmux_bin: &str) -> Result<()> {

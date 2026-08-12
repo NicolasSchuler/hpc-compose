@@ -68,7 +68,6 @@ pub(crate) mod preflight;
 pub mod prepare;
 pub(crate) mod process_probe;
 pub(crate) mod progress;
-#[allow(dead_code)]
 pub(crate) mod readiness_analysis;
 pub(crate) mod readiness_util;
 pub(crate) mod redaction;

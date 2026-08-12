@@ -96,7 +96,6 @@ pub(crate) fn short_digest_prefix(hash: &str) -> &str {
     &hash[..16]
 }
 
-#[allow(dead_code)]
 pub(crate) fn extract_human_sbatch_job_id(text: &str) -> Option<&str> {
     const MARKER: &str = "Submitted batch job ";
     let rest = &text[text.find(MARKER)? + MARKER.len()..];
