@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 /// Resolves *path* to an absolute path using *base* as the reference
 /// directory. Relative paths are joined onto *base*; absolute paths are
 /// returned unchanged.
-pub fn absolute_path(path: &Path, base: &Path) -> PathBuf {
+pub(crate) fn absolute_path(path: &Path, base: &Path) -> PathBuf {
     if path.is_absolute() {
         normalize_path(path.to_path_buf())
     } else {
@@ -17,13 +17,13 @@ pub fn absolute_path(path: &Path, base: &Path) -> PathBuf {
 
 /// Resolves *path* to an absolute path using the current working directory as
 /// the reference directory.
-pub fn absolute_path_cwd(path: &Path) -> Result<PathBuf> {
+pub(crate) fn absolute_path_cwd(path: &Path) -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     Ok(absolute_path(path, &cwd))
 }
 
 /// Removes `.` components and resolves `..` components.
-pub fn normalize_path(path: PathBuf) -> PathBuf {
+pub(crate) fn normalize_path(path: PathBuf) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {

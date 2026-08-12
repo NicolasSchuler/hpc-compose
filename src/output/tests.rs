@@ -7,7 +7,8 @@ use super::*;
 use crate::commands::run_command;
 use hpc_compose::cache::{CacheEntryKind, CacheEntryManifest};
 use hpc_compose::cli::{
-    CacheCommands, Commands, HoldOnExit, RemoteInstallMode, RuntimeLaunchArgs, WatchMode,
+    CacheCommands, Commands, HoldOnExit, OutputFormat, RemoteInstallMode, RuntimeLaunchArgs,
+    StatsOutputFormat, WatchMode,
 };
 use hpc_compose::job::{
     ArtifactExportReport, ArtifactManifest, BatchLogStatus, CleanupJobReport, CleanupReport,
@@ -30,6 +31,48 @@ fn pretty_json_boundary_preserves_serde_shape_and_trailing_newline_policy() {
     let actual = to_pretty_json(&value).expect("output boundary");
     assert_eq!(actual.as_bytes(), expected.as_bytes());
     assert!(!actual.ends_with('\n'), "printing owns the single newline");
+}
+
+#[test]
+fn common_output_format_resolution_preserves_defaults_and_json_precedence() {
+    assert_eq!(resolve_output_format(None), OutputFormat::Text);
+    assert_eq!(
+        resolve_output_format(Some(OutputFormat::Text)),
+        OutputFormat::Text
+    );
+    assert_eq!(
+        resolve_output_format(Some(OutputFormat::Json)),
+        OutputFormat::Json
+    );
+
+    assert_eq!(
+        resolve_stats_output_format(None, false),
+        StatsOutputFormat::Text
+    );
+    assert_eq!(
+        resolve_stats_output_format(Some(StatsOutputFormat::Text), false),
+        StatsOutputFormat::Text
+    );
+    assert_eq!(
+        resolve_stats_output_format(Some(StatsOutputFormat::Json), false),
+        StatsOutputFormat::Json
+    );
+    assert_eq!(
+        resolve_stats_output_format(Some(StatsOutputFormat::Csv), false),
+        StatsOutputFormat::Csv
+    );
+    assert_eq!(
+        resolve_stats_output_format(None, true),
+        StatsOutputFormat::Json
+    );
+    assert_eq!(
+        resolve_stats_output_format(Some(StatsOutputFormat::Text), true),
+        StatsOutputFormat::Json
+    );
+    assert_eq!(
+        resolve_stats_output_format(Some(StatsOutputFormat::Csv), true),
+        StatsOutputFormat::Json
+    );
 }
 
 fn rust_sources_under(root: &Path) -> Vec<PathBuf> {
@@ -1253,6 +1296,28 @@ fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
 }
 
 #[test]
+fn service_step_geometry_preserves_exact_placement_mode_labels() {
+    let mut service = runtime_service(
+        ImageSource::Remote("docker://redis:7".into()),
+        PathBuf::from("/shared/cache/redis.sqsh"),
+        None,
+    );
+
+    let cases = [
+        (ServicePlacementMode::PrimaryNode, "primary_node"),
+        (ServicePlacementMode::Partitioned, "partitioned"),
+        (ServicePlacementMode::Distributed, "distributed"),
+    ];
+    for (mode, label) in cases {
+        service.placement.mode = mode;
+        assert_eq!(
+            format_service_step_geometry(&service),
+            format!("mode={label} nodes=1 ntasks=1 ntasks_per_node=auto")
+        );
+    }
+}
+
+#[test]
 fn helper_functions_cover_remaining_formatting_paths() {
     assert_eq!(display_stats_value(""), "unknown");
     assert_eq!(display_stats_value("5"), "5");
@@ -2235,7 +2300,7 @@ fn readiness_http_authority_policies_preserve_their_intentional_distinctions() {
             timeout_seconds: None,
         };
         assert_eq!(
-            crate::readiness_util::readiness_uses_implicit_localhost(Some(&readiness)),
+            crate::readiness_analysis::readiness_uses_implicit_localhost(Some(&readiness)),
             implicit_localhost,
             "locality case {url:?}"
         );

@@ -858,6 +858,33 @@ fn lint_fix_makes_depends_on_condition_explicit_and_preserves_comments() {
 }
 
 #[test]
+fn lint_fix_dry_run_preserves_exact_stdout() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "compose.yaml",
+        "services:\n  app:\n    image: redis:7\n    depends_on:\n      - redis\n  redis:\n    image: redis:7\n    readiness:\n      type: sleep\n      seconds: 1\n",
+    );
+
+    let dry = run_cli(
+        tmpdir.path(),
+        &[
+            "lint",
+            "-f",
+            compose.to_str().expect("path"),
+            "--fix",
+            "--dry-run",
+        ],
+    );
+
+    assert_eq!(dry.status.code(), Some(4));
+    assert_eq!(
+        stdout_text(&dry),
+        "WARN HPC006 service=app: service 'app' depends on 'redis' without an explicit condition; it currently resolves to 'service_started'\n  field: services.app.depends_on.redis\n  recommendation: Make the condition explicit so author intent is unambiguous. `lint --fix` writes the current default for you.\n\nProposed changes (--dry-run):\n--- lint --fix (proposed)\n+++ lint --fix (proposed)\nservices:\n  app:\n    image: redis:7\n    depends_on:\n-      - redis\n+      redis:\n+        condition: service_started\n  redis:\n    image: redis:7\n    readiness:\n      type: sleep\n      seconds: 1\n"
+    );
+}
+
+#[test]
 fn lint_fix_is_noop_when_nothing_is_fixable() {
     // A spec whose only findings are advisory (node-local cache/volume) has no
     // fixable edges, so --fix must not rewrite the file or print a summary.

@@ -8,7 +8,7 @@
 
 /// Actionable guidance for a terminal Slurm job state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminalRemediation {
+pub(crate) struct TerminalRemediation {
     /// One-line, user-facing explanation of what the state means and what to do.
     pub message: &'static str,
     /// Whether suggesting `inspect --rightsize` is relevant (memory/time issues).
@@ -20,7 +20,7 @@ pub struct TerminalRemediation {
 /// `CANCELLED`). Matching is case-insensitive and ignores any trailing detail
 /// Slurm appends (such as `CANCELLED by 1234`).
 #[must_use]
-pub fn interpret(state: &str) -> Option<TerminalRemediation> {
+pub(crate) fn interpret(state: &str) -> Option<TerminalRemediation> {
     let normalized = state.trim().to_ascii_uppercase();
     let key = normalized.split_whitespace().next().unwrap_or("");
     let (message, suggest_rightsize) = match key {

@@ -18,7 +18,11 @@ fn default_max_distance(target: &str) -> usize {
 /// Comparison is case-insensitive; the returned string keeps the candidate's
 /// original casing. When two candidates tie, the first one wins.
 #[must_use]
-pub fn nearest<'a>(target: &str, candidates: &[&'a str], max_distance: usize) -> Option<&'a str> {
+pub(crate) fn nearest<'a>(
+    target: &str,
+    candidates: &[&'a str],
+    max_distance: usize,
+) -> Option<&'a str> {
     let target_lower = target.to_ascii_lowercase();
     let mut best: Option<(&'a str, usize)> = None;
     for candidate in candidates {
@@ -37,7 +41,7 @@ pub fn nearest<'a>(target: &str, candidates: &[&'a str], max_distance: usize) ->
 /// Returns the closest candidate to `target` using the default length-based
 /// distance ceiling.
 #[must_use]
-pub fn nearest_default<'a>(target: &str, candidates: &[&'a str]) -> Option<&'a str> {
+pub(crate) fn nearest_default<'a>(target: &str, candidates: &[&'a str]) -> Option<&'a str> {
     nearest(target, candidates, default_max_distance(target))
 }
 

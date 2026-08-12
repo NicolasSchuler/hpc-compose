@@ -16,7 +16,7 @@ const HIGH_MEMORY_PER_CPU_BYTES: u64 = 512 * 1_024 * 1_024 * 1_024;
 /// Severity for a lint finding.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum LintLevel {
+pub(crate) enum LintLevel {
     /// Advisory finding that is worth reviewing.
     Warning,
     /// Finding severe enough to reject a spec.
@@ -30,7 +30,7 @@ pub enum LintLevel {
 /// [`SuggestedFix`]; everything else stays advisory.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SuggestedFix {
+pub(crate) enum SuggestedFix {
     /// Rewrite a `depends_on` edge so its condition is explicit instead of
     /// relying on the implicit `service_started` default.
     DependsOnCondition {
@@ -45,7 +45,7 @@ pub enum SuggestedFix {
 
 /// One stable lint finding emitted by `hpc-compose lint`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct LintFinding {
+pub(crate) struct LintFinding {
     /// Finding severity.
     pub level: LintLevel,
     /// Stable lint rule identifier.
@@ -107,7 +107,7 @@ impl LintFinding {
 
 /// Runs opinionated static lint checks over a validated runtime plan.
 #[must_use]
-pub fn lint_plan(
+pub(crate) fn lint_plan(
     plan: &Plan,
     runtime_plan: &RuntimePlan,
     cluster_profile: Option<&ClusterProfile>,

@@ -1,5 +1,3 @@
-#![allow(unused_imports)]
-
 use std::path::PathBuf;
 
 use hpc_compose::context::{ResolvedValue, ValueSource};
@@ -8,11 +6,81 @@ use hpc_compose::lint_fix::AppliedFix;
 use serde::Serialize;
 
 pub(crate) use super::{
-    InterpolationVarsOutput, RenderOutput, ValidateOutput, build_validate_output,
-    print_interpolation_vars, print_plan_inspect, print_plan_inspect_tree,
-    print_plan_inspect_verbose, print_plan_inspect_verbose_with_profile, print_prepare_summary,
-    print_report, print_rightsize_report,
+    InterpolationVarsOutput, RenderOutput, build_validate_output, print_interpolation_vars,
+    print_plan_inspect, print_plan_inspect_tree, print_plan_inspect_verbose,
+    print_plan_inspect_verbose_with_profile, print_prepare_summary, print_report,
+    print_rightsize_report,
 };
+
+/// Renders the proposed lint rewrite as a minimal unified diff.
+///
+/// Uses an LCS-over-lines pass. Unchanged ("equal") lines are emitted
+/// verbatim (no leading space) so the surrounding context of each change is
+/// readable without the noise of a full unified-diff context window.
+pub(crate) fn unified_diff(original: &str, updated: &str) -> String {
+    let a: Vec<&str> = original.split_inclusive('\n').collect();
+    let b: Vec<&str> = updated.split_inclusive('\n').collect();
+    let hunks = diff_hunks(&a, &b);
+    let mut out = String::new();
+    out.push_str("--- lint --fix (proposed)\n+++ lint --fix (proposed)\n");
+    for (tag, line) in hunks {
+        match tag {
+            DiffTag::Equal => out.push_str(line),
+            DiffTag::Delete => {
+                out.push('-');
+                out.push_str(line);
+            }
+            DiffTag::Insert => {
+                out.push('+');
+                out.push_str(line);
+            }
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy)]
+enum DiffTag {
+    Equal,
+    Delete,
+    Insert,
+}
+
+fn diff_hunks<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<(DiffTag, &'a str)> {
+    let lcs = lcs_table(a, b);
+    let mut i = a.len();
+    let mut j = b.len();
+    let mut out = Vec::new();
+    while i > 0 || j > 0 {
+        if i > 0 && j > 0 && a[i - 1] == b[j - 1] {
+            out.push((DiffTag::Equal, a[i - 1]));
+            i -= 1;
+            j -= 1;
+        } else if j > 0 && (i == 0 || lcs[i][j - 1] >= lcs[i - 1][j]) {
+            out.push((DiffTag::Insert, b[j - 1]));
+            j -= 1;
+        } else {
+            out.push((DiffTag::Delete, a[i - 1]));
+            i -= 1;
+        }
+    }
+    out.reverse();
+    out
+}
+
+fn lcs_table(a: &[&str], b: &[&str]) -> Vec<Vec<usize>> {
+    let mut dp = vec![vec![0_usize; b.len() + 1]; a.len() + 1];
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            dp[i][j] = if a[i - 1] == b[j - 1] {
+                dp[i - 1][j - 1] + 1
+            } else {
+                dp[i - 1][j].max(dp[i][j - 1])
+            };
+        }
+    }
+    dp
+}
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct LintOutput {
@@ -101,4 +169,45 @@ pub(crate) struct ContextOutput {
     pub(crate) interpolation_var_sources: std::collections::BTreeMap<String, ValueSource>,
     pub(crate) compose_load_error: Option<String>,
     pub(crate) runtime_paths: ContextRuntimePaths,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unified_diff_preserves_headers_equal_lines_and_edits() {
+        assert_eq!(
+            unified_diff("a\nb\nc\n", "a\nx\nc\n"),
+            "--- lint --fix (proposed)\n+++ lint --fix (proposed)\na\n-b\n+x\nc\n"
+        );
+    }
+
+    #[test]
+    fn unified_diff_preserves_unchanged_input_verbatim() {
+        assert_eq!(
+            unified_diff("a\nb\n", "a\nb\n"),
+            "--- lint --fix (proposed)\n+++ lint --fix (proposed)\na\nb\n"
+        );
+    }
+
+    #[test]
+    fn unified_diff_preserves_trailing_newline_behavior() {
+        assert_eq!(
+            unified_diff("a\nold", "a\nnew"),
+            "--- lint --fix (proposed)\n+++ lint --fix (proposed)\na\n-old+new"
+        );
+        assert_eq!(
+            unified_diff("a\n", "a"),
+            "--- lint --fix (proposed)\n+++ lint --fix (proposed)\n-a\n+a"
+        );
+    }
+
+    #[test]
+    fn unified_diff_preserves_lcs_tie_breaking() {
+        assert_eq!(
+            unified_diff("a\nb\n", "b\na\n"),
+            "--- lint --fix (proposed)\n+++ lint --fix (proposed)\n-a\nb\n+a\n"
+        );
+    }
 }

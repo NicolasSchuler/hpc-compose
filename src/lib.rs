@@ -4,13 +4,14 @@
 //! pipeline:
 //!
 //! 1. [`spec`] parses and validates the Compose-like input file.
-//! 2. [`planner`] normalizes that spec into a concrete runtime plan.
-//! 3. `preflight` checks the login-node environment.
-//! 4. [`prepare`] imports or rebuilds runtime artifacts when needed.
-//! 5. [`render`] generates the batch script executed by Slurm.
-//! 6. [`job`] tracks submitted jobs, logs, metrics, and exported artifacts.
-//! 7. [`cache`] records reusable image artifacts.
-//! 8. [`init`] exposes the shipped starter templates.
+//! 2. [`planner`] normalizes that spec into a deterministic plan.
+//! 3. [`runtime_plan`] derives the runtime-ready service model and cache paths.
+//! 4. `preflight` checks the login-node environment.
+//! 5. [`prepare`] imports or rebuilds runtime artifacts when needed.
+//! 6. [`render`] generates the batch script executed by Slurm.
+//! 7. [`job`] tracks submitted jobs, logs, metrics, and exported artifacts.
+//! 8. [`cache`] records reusable image artifacts.
+//! 9. [`init`] exposes the shipped starter templates.
 //!
 //! This crate is primarily an implementation detail of the CLI. Public items
 //! are exposed so the binary and integration tests can share the same logic;
@@ -33,7 +34,7 @@
 //! assert!(script.contains("#SBATCH"));
 //! # Ok::<(), anyhow::Error>(())
 //! ```
-#![warn(missing_docs)]
+#![warn(missing_docs, unreachable_pub)]
 
 extern crate self as hpc_compose;
 
@@ -93,7 +94,7 @@ pub mod workspace;
 /// Converts a CLI failure into a rendered diagnostic report while preserving
 /// structured spec diagnostics when they are present inside an `anyhow::Error`.
 pub fn cli_error_report(error: anyhow::Error) -> miette::Report {
-    spec_error::cli_error_report(error)
+    diagnostics::cli_error_report(error)
 }
 
 /// Test-only shared synchronization primitives.

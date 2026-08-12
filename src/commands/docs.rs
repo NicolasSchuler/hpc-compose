@@ -1,7 +1,6 @@
 use anyhow::Result;
 use hpc_compose::cli::OutputFormat;
 use hpc_compose::docs_search::{DocsSearchOutput, search_docs};
-use hpc_compose::term;
 
 use crate::output;
 
@@ -20,33 +19,46 @@ pub(crate) fn search(
 }
 
 fn print_text(report: &DocsSearchOutput) {
-    println!(
-        "{}",
-        term::styled_section_header(&format!("Docs matches for `{}`", report.query))
-    );
-    println!(
-        "Static offline search over the bundled manual; no settings, SSH, Slurm, or browser access."
-    );
-    println!();
+    write_text(&mut std::io::stdout(), report);
+}
 
-    if report.matches.is_empty() {
-        println!(
-            "No docs matched. Try a command, field, or symptom such as `cache`, `--offline`, or `readiness`."
-        );
-        return;
+fn write_text(writer: &mut impl std::io::Write, report: &DocsSearchOutput) {
+    output::docs::write_search_results(writer, report).expect("failed printing to stdout");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Write};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::*;
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed stdout"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
-    for (index, hit) in report.matches.iter().enumerate() {
-        println!(
-            "{}. {} ({})",
-            index + 1,
-            term::styled_bold(&hit.title),
-            hit.location()
-        );
-        if let Some(heading) = &hit.heading {
-            println!("   Section: {heading}");
-        }
-        println!("   {}", hit.snippet);
-        println!();
+    #[test]
+    fn text_stdout_failure_retains_println_panic_semantics() {
+        let report = search_docs("cache", 1);
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            write_text(&mut FailingWriter, &report);
+        }));
+
+        let payload = panic.expect_err("closed stdout must retain the historical panic");
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(message.starts_with("failed printing to stdout: "));
+        assert!(message.contains("closed stdout"));
     }
 }

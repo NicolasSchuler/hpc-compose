@@ -13,7 +13,7 @@
 /// is one shell word that expands to exactly `value` with no further
 /// interpretation.
 #[must_use]
-pub fn quote(value: &str) -> String {
+pub(crate) fn quote(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
     }

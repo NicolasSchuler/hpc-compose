@@ -16,7 +16,7 @@ use crate::spec::{DependencyCondition, DependsOnSpec};
 
 /// A fix that was successfully applied to the source text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct AppliedFix {
+pub(crate) struct AppliedFix {
     /// Lint rule code that produced the fix.
     pub code: &'static str,
     /// Service owning the rewritten field.
@@ -39,7 +39,7 @@ pub struct AppliedFix {
 ///
 /// Returns an error if any individual fix cannot locate its target or refuses
 /// to produce a valid rewrite.
-pub fn apply_fixes(text: &str, fixes: &[SuggestedFix]) -> Result<(String, Vec<AppliedFix>)> {
+pub(crate) fn apply_fixes(text: &str, fixes: &[SuggestedFix]) -> Result<(String, Vec<AppliedFix>)> {
     let mut current = text.to_string();
     let mut applied = Vec::new();
     for fix in fixes {
@@ -535,78 +535,6 @@ fn block_end_line(lines: &[&str], start_idx: usize, parent_indent: usize) -> usi
     lines.len()
 }
 
-// --- unified diff for --dry-run -------------------------------------------
-
-/// Renders a minimal unified diff between *original* and *updated*.
-///
-/// Uses an LCS-over-lines pass. Unchanged ("equal") lines are emitted
-/// verbatim (no leading space) so the surrounding context of each change is
-/// readable without the noise of a full unified-diff context window.
-pub fn unified_diff(original: &str, updated: &str) -> String {
-    let a: Vec<&str> = original.split_inclusive('\n').collect();
-    let b: Vec<&str> = updated.split_inclusive('\n').collect();
-    let hunks = diff_hunks(&a, &b);
-    let mut out = String::new();
-    out.push_str("--- lint --fix (proposed)\n+++ lint --fix (proposed)\n");
-    for (tag, line) in hunks {
-        match tag {
-            DiffTag::Equal => out.push_str(line),
-            DiffTag::Delete => {
-                out.push('-');
-                out.push_str(line);
-            }
-            DiffTag::Insert => {
-                out.push('+');
-                out.push_str(line);
-            }
-        }
-    }
-    out
-}
-
-#[derive(Clone, Copy)]
-enum DiffTag {
-    Equal,
-    Delete,
-    Insert,
-}
-
-fn diff_hunks<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<(DiffTag, &'a str)> {
-    let lcs = lcs_table(a, b);
-    let mut i = a.len();
-    let mut j = b.len();
-    let mut out = Vec::new();
-    while i > 0 || j > 0 {
-        if i > 0 && j > 0 && a[i - 1] == b[j - 1] {
-            out.push((DiffTag::Equal, a[i - 1]));
-            i -= 1;
-            j -= 1;
-        } else if j > 0 && (i == 0 || lcs[i][j - 1] >= lcs[i - 1][j]) {
-            out.push((DiffTag::Insert, b[j - 1]));
-            j -= 1;
-        } else {
-            out.push((DiffTag::Delete, a[i - 1]));
-            i -= 1;
-        }
-    }
-    out.reverse();
-    out
-}
-
-fn lcs_table(a: &[&str], b: &[&str]) -> Vec<Vec<usize>> {
-    let mut dp = vec![vec![0_usize; b.len() + 1]; a.len() + 1];
-    for i in 1..=a.len() {
-        for j in 1..=b.len() {
-            dp[i][j] = if a[i - 1] == b[j - 1] {
-                dp[i - 1][j - 1] + 1
-            } else {
-                dp[i - 1][j].max(dp[i][j - 1])
-            };
-        }
-    }
-    dp
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -727,28 +655,5 @@ mod tests {
         assert_eq!(strip_trailing_comment("[a, b]  # note"), "[a, b]");
         assert_eq!(strip_trailing_comment("[a, b]"), "[a, b]");
         assert_eq!(strip_trailing_comment("value # not yaml"), "value");
-    }
-
-    #[test]
-    fn unified_diff_marks_insertions_and_deletions() {
-        let diff = unified_diff("a\nb\nc\n", "a\nx\nc\n");
-        assert!(diff.starts_with("--- lint --fix (proposed)\n+++ lint --fix (proposed)\n"));
-        assert!(diff.contains("-b\n"));
-        assert!(diff.contains("+x\n"));
-        // Equal lines are emitted verbatim (no leading space).
-        assert!(diff.contains("a\n"));
-        assert!(diff.contains("c\n"));
-    }
-
-    #[test]
-    fn unified_diff_no_change_is_empty_of_edits() {
-        let diff = unified_diff("a\nb\n", "a\nb\n");
-        // The only `-`/`+` characters should be the two header lines.
-        let change_lines = diff
-            .lines()
-            .filter(|line| line.starts_with('-') || line.starts_with('+'))
-            .filter(|line| !line.starts_with("---") && !line.starts_with("+++"))
-            .count();
-        assert_eq!(change_lines, 0, "no change lines expected:\n{diff}");
     }
 }

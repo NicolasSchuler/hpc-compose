@@ -21,7 +21,7 @@ use hpc_compose::runtime_plan::{RuntimePlan, build_runtime_plan};
 use hpc_compose::spec::{missing_defaulted_variables, referenced_variables};
 use hpc_compose::term;
 
-use crate::commands::load;
+use crate::commands::load::{self, load_discovered_cluster_profile};
 pub(crate) use crate::output::spec::{
     ContextOutput, ContextRuntimePaths, ExplainEntry, ExplainOutput, LintOutput, PlanHint,
     PlanOutput,
@@ -167,7 +167,7 @@ pub(crate) fn lint(
             .context("lint --fix could not apply a fix safely")?;
         applied_fixes = applied;
         if dry_run {
-            dry_run_diff = Some(lint_fix::unified_diff(&original_text, &new_text));
+            dry_run_diff = Some(output_spec::unified_diff(&original_text, &new_text));
         } else {
             crate::secure_io::write_atomic_preserving_mode(
                 &context.compose_file.value,
@@ -1466,17 +1466,6 @@ fn scoped_interpolation_vars(
     (scoped_vars, scoped_sources)
 }
 
-fn load_discovered_cluster_profile(
-    context: &ResolvedContext,
-) -> Result<Option<hpc_compose::cluster::ClusterProfile>> {
-    let start = context
-        .compose_file
-        .value
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    hpc_compose::cluster::load_discovered_cluster_profile(start)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1919,6 +1908,55 @@ services:
             interpolation_var_sources: BTreeMap::new(),
             watch: Default::default(),
         }
+    }
+
+    fn write_test_cluster_profile(root: &std::path::Path, name: &str) -> PathBuf {
+        let path = root.join(".hpc-compose/cluster.toml");
+        fs::create_dir_all(path.parent().expect("cluster profile parent"))
+            .expect("create cluster profile parent");
+        fs::write(
+            &path,
+            format!("schema_version = 1\n[site]\nname = \"{name}\"\n"),
+        )
+        .expect("write cluster profile");
+        path
+    }
+
+    #[test]
+    fn resolved_context_cluster_profile_discovery_uses_compose_parent_and_nearest_error() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let project = tmpdir.path().join("project");
+        let compose_dir = project.join("nested");
+        let unrelated_cwd = tmpdir.path().join("cwd");
+        fs::create_dir_all(&compose_dir).expect("create compose directory");
+        fs::create_dir_all(&unrelated_cwd).expect("create unrelated cwd");
+        let compose = compose_dir.join("compose.yaml");
+        let context = context_for(&compose, &unrelated_cwd);
+
+        write_test_cluster_profile(&unrelated_cwd, "cwd-only");
+        assert!(
+            load_discovered_cluster_profile(&context)
+                .expect("missing compose-parent profile is optional")
+                .is_none(),
+            "discovery must not fall back to ResolvedContext.cwd"
+        );
+
+        write_test_cluster_profile(&project, "compose-parent");
+        let discovered = load_discovered_cluster_profile(&context)
+            .expect("discover compose-parent profile")
+            .expect("compose-parent profile");
+        assert_eq!(discovered.site.name.as_deref(), Some("compose-parent"));
+
+        let nearest_path = compose_dir.join(".hpc-compose/cluster.toml");
+        fs::create_dir_all(nearest_path.parent().expect("nearest profile parent"))
+            .expect("create nearest profile parent");
+        fs::write(&nearest_path, "schema_version = [\n").expect("write malformed profile");
+        let error = load_discovered_cluster_profile(&context)
+            .expect_err("malformed nearest profile must block the valid ancestor");
+        assert_eq!(
+            error.to_string(),
+            format!("failed to parse cluster profile {}", nearest_path.display())
+        );
     }
 
     fn tempdir_in_repo() -> tempfile::TempDir {

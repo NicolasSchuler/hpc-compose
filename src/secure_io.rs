@@ -24,7 +24,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// owner-only `0o600` permissions on Unix, so secret-bearing artifacts are not
 /// readable by other users on shared filesystems. On non-Unix targets
 /// `restricted` has no effect.
-pub fn write(
+pub(crate) fn write(
     path: impl AsRef<Path>,
     contents: impl AsRef<[u8]>,
     restricted: bool,
@@ -67,7 +67,7 @@ pub fn write(
 /// security boundary: a pre-planted regular file or symlink is rejected. When
 /// `restricted` is true, the created file is forced to owner-only `0o600` on
 /// Unix. A short write removes the newly created file before returning.
-pub fn write_exclusive(
+pub(crate) fn write_exclusive(
     path: impl AsRef<Path>,
     contents: impl AsRef<[u8]>,
     restricted: bool,
@@ -90,7 +90,7 @@ pub fn write_exclusive(
 /// the destination (rename within a directory is atomic on POSIX), so a
 /// concurrent reader never observes a partially written file. When `restricted`
 /// is true the temporary file — and therefore the destination — is `0o600`.
-pub fn write_atomic(
+pub(crate) fn write_atomic(
     path: impl AsRef<Path>,
     contents: impl AsRef<[u8]>,
     restricted: bool,
@@ -109,7 +109,7 @@ pub fn write_atomic(
 /// `0600` file must stay private after an atomic rewrite, while normal files
 /// should keep their original readability. If no regular destination exists,
 /// `restricted_if_new` controls the creation mode just like [`write_atomic`].
-pub fn write_atomic_preserving_mode(
+pub(crate) fn write_atomic_preserving_mode(
     path: impl AsRef<Path>,
     contents: impl AsRef<[u8]>,
     restricted_if_new: bool,
@@ -259,7 +259,7 @@ fn unique_temp_path(path: &Path, attempt: u32) -> PathBuf {
 /// Advisory-lock mode for [`with_flock`].
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
-pub enum LockKind {
+pub(crate) enum LockKind {
     /// Shared (read) lock — multiple holders may coexist.
     Shared,
     /// Exclusive (write) lock — at most one holder.
@@ -273,7 +273,7 @@ pub enum LockKind {
 /// file is intentionally retained after the guard drops so every process keeps
 /// locking the same inode.
 #[derive(Debug)]
-pub struct StrictFlockGuard {
+pub(crate) struct StrictFlockGuard {
     file: fs::File,
     #[cfg(not(unix))]
     _process_guard: std::sync::MutexGuard<'static, ()>,
@@ -284,7 +284,7 @@ pub struct StrictFlockGuard {
 /// On Unix this uses `flock(2)`. Other targets retain the stable lock file and
 /// serialize callers within the current process; hpc-compose's shared-cluster
 /// artifact export path runs on Unix, where the lock is process-wide.
-pub fn acquire_flock_strict(
+pub(crate) fn acquire_flock_strict(
     lock_path: &Path,
     kind: LockKind,
     timeout: std::time::Duration,
@@ -394,7 +394,7 @@ fn debug_lock_note(lock_path: &Path, detail: &str) {
     }
 }
 
-pub fn with_flock<T, E>(
+pub(crate) fn with_flock<T, E>(
     lock_path: &Path,
     kind: LockKind,
     timeout: std::time::Duration,

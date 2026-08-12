@@ -127,44 +127,6 @@ pub struct RuntimeLaunchArgs {
     pub no_preflight: bool,
 }
 
-/// Slurm submission tool overrides shared across `up`, `germinate`, `test`,
-/// `when`, and `run`.
-#[derive(Debug, clap::Args)]
-pub struct SlurmSubmitArgs {
-    #[arg(
-        long,
-        value_name = "PATH",
-        default_value = "sbatch",
-        help_heading = "Tool overrides",
-        help = "Path to the sbatch executable"
-    )]
-    pub sbatch_bin: String,
-    #[arg(
-        long,
-        value_name = "PATH",
-        default_value = "srun",
-        help_heading = "Tool overrides",
-        help = "Path to the srun executable"
-    )]
-    pub srun_bin: String,
-    #[arg(
-        long,
-        value_name = "PATH",
-        default_value = "squeue",
-        help_heading = "Tool overrides",
-        help = "Path to the squeue executable"
-    )]
-    pub squeue_bin: String,
-    #[arg(
-        long,
-        value_name = "PATH",
-        default_value = "sacct",
-        help_heading = "Tool overrides",
-        help = "Path to the sacct executable"
-    )]
-    pub sacct_bin: String,
-}
-
 /// The `--remote[=HOST]` follow-up delegation flag shared by the read-only
 /// inspection commands (`status`, `stats`, `score`, `pull`, `logs`, `ps`). Runs
 /// the command on the login node's staged checkout from a prior `up --remote`.

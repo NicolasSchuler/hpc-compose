@@ -33,11 +33,11 @@ const SENSITIVE_NAME_NEEDLES: &[&str] = &[
 /// Placeholder substituted for every redacted secret value. Shared so code
 /// that *detects* redacted output (e.g. the spec-diff redaction note) cannot
 /// drift from the substitution itself.
-pub const REDACTED_PLACEHOLDER: &str = "<redacted>";
+pub(crate) const REDACTED_PLACEHOLDER: &str = "<redacted>";
 
 /// Returns `true` when *name* matches the sensitive-name heuristic.
 #[must_use]
-pub fn is_sensitive_name(name: &str) -> bool {
+pub(crate) fn is_sensitive_name(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     SENSITIVE_NAME_NEEDLES
         .iter()
@@ -47,7 +47,7 @@ pub fn is_sensitive_name(name: &str) -> bool {
 /// Returns `true` when a value with *name* and optional *source* must be
 /// redacted. A [`ValueSource::Secret`] is always sensitive regardless of name.
 #[must_use]
-pub fn is_sensitive(name: &str, source: Option<ValueSource>) -> bool {
+pub(crate) fn is_sensitive(name: &str, source: Option<ValueSource>) -> bool {
     match source {
         Some(ValueSource::Secret) => true,
         _ => is_sensitive_name(name),
@@ -56,7 +56,7 @@ pub fn is_sensitive(name: &str, source: Option<ValueSource>) -> bool {
 
 /// Returns the redacted value for a single env entry unless values are shown.
 #[must_use]
-pub fn redact_value(
+pub(crate) fn redact_value(
     name: &str,
     value: &str,
     source: Option<ValueSource>,
@@ -78,7 +78,7 @@ pub fn redact_value(
 /// value exactly matches a known resolved secret value (so
 /// `TOKEN: ${hf_token}` is hidden even when the key is benign).
 #[must_use]
-pub fn redact_env_map(
+pub(crate) fn redact_env_map(
     map: &BTreeMap<String, String>,
     secret_values: &BTreeSet<String>,
     show_values: bool,
@@ -97,7 +97,7 @@ pub fn redact_env_map(
 /// print directly, such as resolved argv, environment values, mounts, and
 /// prepare commands.
 #[must_use]
-pub fn redacted_runtime_plan(
+pub(crate) fn redacted_runtime_plan(
     plan: &RuntimePlan,
     secret_values: &BTreeSet<String>,
     show_values: bool,
@@ -170,7 +170,7 @@ fn redact_execution(execution: &ExecutionSpec, secret_values: &BTreeSet<String>)
 /// Redacts known secret substrings from a free-form string unless values are
 /// explicitly shown.
 #[must_use]
-pub fn redact_freeform_string(
+pub(crate) fn redact_freeform_string(
     value: &str,
     secret_values: &BTreeSet<String>,
     show_values: bool,
@@ -184,7 +184,7 @@ pub fn redact_freeform_string(
 
 /// Serializes a value to JSON and redacts sensitive strings anywhere in that
 /// diagnostic surface.
-pub fn redacted_json_value<T>(
+pub(crate) fn redacted_json_value<T>(
     value: &T,
     secret_values: &BTreeSet<String>,
     show_values: bool,
@@ -199,7 +199,7 @@ where
 
 /// Serializes a value to YAML and redacts sensitive strings anywhere in that
 /// diagnostic surface.
-pub fn redacted_yaml_value<T>(
+pub(crate) fn redacted_yaml_value<T>(
     value: &T,
     secret_values: &BTreeSet<String>,
     show_values: bool,
@@ -213,7 +213,7 @@ where
 }
 
 /// Redacts sensitive strings in a JSON value in place.
-pub fn redact_json_value(
+pub(crate) fn redact_json_value(
     value: &mut serde_json::Value,
     secret_values: &BTreeSet<String>,
     show_values: bool,
@@ -225,7 +225,7 @@ pub fn redact_json_value(
 }
 
 /// Redacts sensitive strings in a YAML value in place.
-pub fn redact_yaml_value(
+pub(crate) fn redact_yaml_value(
     value: &mut serde_norway::Value,
     secret_values: &BTreeSet<String>,
     show_values: bool,

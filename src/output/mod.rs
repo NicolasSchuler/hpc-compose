@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cache::CacheEntryKind;
-use hpc_compose::cli::{CsvOutputFormat, OutputFormat, StatsOutputFormat};
+use hpc_compose::cli::CsvOutputFormat;
 use hpc_compose::cluster::ClusterProfile;
 use hpc_compose::diagnostics::Report;
 use hpc_compose::init::{
@@ -43,6 +43,7 @@ use crate::tracked_paths::log_file_name_for_service;
 pub(crate) mod cache;
 pub(crate) mod common;
 pub(crate) mod contract;
+pub(crate) mod docs;
 mod doctor;
 mod evolve;
 mod examples;
@@ -53,6 +54,7 @@ pub(crate) mod spec;
 mod sweep;
 mod workspace;
 
+pub(crate) use common::{resolve_output_format, resolve_stats_output_format};
 pub(crate) use doctor::{ClusterReportJsonOutput, ReadinessDoctorOutput};
 pub(crate) use evolve::{LessonDescriptionOutput, LessonListOutput, StepDescriptionOutput};
 pub(crate) use examples::{ExamplesListOutput, ExamplesRecommendOutput};
@@ -380,21 +382,6 @@ pub(crate) struct SetupOutput {
 pub(crate) fn render_from_path(path: &Path) -> Result<String> {
     let runtime = crate::commands::load::load_runtime_plan(path)?;
     hpc_compose::render::render_script(&runtime)
-}
-
-pub(crate) fn resolve_output_format(format: Option<OutputFormat>) -> OutputFormat {
-    format.unwrap_or(OutputFormat::Text)
-}
-
-pub(crate) fn resolve_stats_output_format(
-    format: Option<StatsOutputFormat>,
-    json: bool,
-) -> StatsOutputFormat {
-    if json {
-        StatsOutputFormat::Json
-    } else {
-        format.unwrap_or(StatsOutputFormat::Text)
-    }
 }
 
 /// Resolves the `sweep results` output format, defaulting to text.
@@ -808,10 +795,7 @@ fn write_job_diff_report(writer: &mut impl Write, report: &JobDiffReport) -> io:
 /// [`write_job_diff_report`]'s section style but carries only the two sections
 /// that exist for a spec comparison (`Resources` / `Config`).
 fn write_spec_diff_report(writer: &mut impl Write, report: &SpecDiffReport) -> io::Result<()> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0);
+    let now = crate::time_util::unix_timestamp_now();
     let submitted = format_age_seconds(now.saturating_sub(report.submitted_at));
     if !report.has_changes() {
         writeln!(
@@ -2965,7 +2949,7 @@ fn inspect_time_limit_warnings(plan: &RuntimePlan) -> Vec<String> {
 
 fn format_service_step_geometry(service: &RuntimeService) -> String {
     let mut parts = vec![
-        format!("mode={}", placement_mode_label(service.placement.mode)),
+        format!("mode={}", service.placement.mode.label()),
         format!("nodes={}", service.placement.nodes),
         format!("ntasks={}", format_optional_u32(service.placement.ntasks)),
         format!(
@@ -3005,14 +2989,6 @@ fn format_optional_u32(value: Option<u32>) -> String {
     value
         .map(|value| value.to_string())
         .unwrap_or_else(|| "auto".to_string())
-}
-
-fn placement_mode_label(mode: ServicePlacementMode) -> &'static str {
-    match mode {
-        ServicePlacementMode::PrimaryNode => "primary_node",
-        ServicePlacementMode::Partitioned => "partitioned",
-        ServicePlacementMode::Distributed => "distributed",
-    }
 }
 
 fn write_plan_inspect(writer: &mut impl Write, plan: &RuntimePlan) -> io::Result<()> {

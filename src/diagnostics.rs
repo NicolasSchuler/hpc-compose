@@ -21,7 +21,7 @@ pub(crate) const CONTEXTUAL_METRICS_COLLECTOR_PREFIX: &str = "metrics collector"
 /// Severity level for one diagnostic finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum Level {
+pub(crate) enum Level {
     /// The check passed.
     Ok,
     /// The check found a non-fatal issue worth surfacing.
@@ -33,7 +33,7 @@ pub enum Level {
 /// One diagnostic finding.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct Item {
+pub(crate) struct Item {
     pub level: Level,
     pub message: String,
     pub remediation: Option<String>,
@@ -42,14 +42,14 @@ pub struct Item {
 /// A flat diagnostic report before items are grouped for display.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct Report {
+pub(crate) struct Report {
     pub items: Vec<Item>,
 }
 
 /// Count summary for a grouped preflight report.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct ReportSummary {
+pub(crate) struct ReportSummary {
     pub blockers: usize,
     pub actionable_warnings: usize,
     pub contextual_warnings: usize,
@@ -59,7 +59,7 @@ pub struct ReportSummary {
 /// Preflight report grouped into blockers, warnings, and passes.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct GroupedReport {
+pub(crate) struct GroupedReport {
     pub summary: ReportSummary,
     pub blockers: Vec<Item>,
     pub actionable_warnings: Vec<Item>,
@@ -69,27 +69,27 @@ pub struct GroupedReport {
 
 impl Report {
     /// Returns `true` when the report contains at least one blocking error.
-    pub fn has_errors(&self) -> bool {
+    pub(crate) fn has_errors(&self) -> bool {
         self.items.iter().any(|item| item.level == Level::Error)
     }
 
     /// Returns `true` when the report contains at least one warning.
-    pub fn has_warnings(&self) -> bool {
+    pub(crate) fn has_warnings(&self) -> bool {
         self.items.iter().any(|item| item.level == Level::Warn)
     }
 
     /// Renders the report in the default grouped text format.
-    pub fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         presentation::render_report(self, false)
     }
 
     /// Renders the report with passed checks included.
-    pub fn render_verbose(&self) -> String {
+    pub(crate) fn render_verbose(&self) -> String {
         presentation::render_report(self, true)
     }
 
     /// Returns a grouped representation used by CLI and JSON output.
-    pub fn grouped(&self) -> GroupedReport {
+    pub(crate) fn grouped(&self) -> GroupedReport {
         let mut blockers = Vec::new();
         let mut actionable_warnings = Vec::new();
         let mut contextual_warnings = Vec::new();
@@ -132,7 +132,7 @@ fn is_contextual_warning(item: &Item) -> bool {
 
 /// How user-facing notices should be written to stderr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoticeFormat {
+pub(crate) enum NoticeFormat {
     /// Human-readable text such as `warning: ...`.
     Text,
     /// One JSON object per line for commands whose stdout is machine-readable.
@@ -142,7 +142,7 @@ pub enum NoticeFormat {
 /// One user-facing notice emitted on stderr.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct Notice {
+pub(crate) struct Notice {
     pub schema_version: u32,
     pub level: &'static str,
     pub code: Option<&'static str>,
@@ -152,11 +152,11 @@ pub struct Notice {
 
 impl Notice {
     /// Output contract version for JSON-line diagnostic notices.
-    pub const SCHEMA_VERSION: u32 = 1;
+    pub(crate) const SCHEMA_VERSION: u32 = 1;
 
     /// Builds a warning notice.
     #[must_use]
-    pub fn warning(message: impl Into<String>) -> Self {
+    pub(crate) fn warning(message: impl Into<String>) -> Self {
         Self {
             schema_version: Self::SCHEMA_VERSION,
             level: "warning",
@@ -168,7 +168,7 @@ impl Notice {
 
     /// Builds an informational notice.
     #[must_use]
-    pub fn informational(message: impl Into<String>) -> Self {
+    pub(crate) fn informational(message: impl Into<String>) -> Self {
         Self {
             schema_version: Self::SCHEMA_VERSION,
             level: "notice",
@@ -180,7 +180,7 @@ impl Notice {
 
     /// Adds a stable code to the notice.
     #[must_use]
-    pub fn with_code(mut self, code: &'static str) -> Self {
+    pub(crate) fn with_code(mut self, code: &'static str) -> Self {
         self.code = Some(code);
         self
     }
@@ -188,32 +188,38 @@ impl Notice {
 
 /// Initializes tracing. `RUST_LOG` wins; otherwise `--debug` and repeatable
 /// `--verbose` choose a conservative default filter.
-pub fn init_logging(verbose: u8, debug: bool) {
+pub(crate) fn init_logging(verbose: u8, debug: bool) {
     presentation::init_logging(verbose, debug);
 }
 
+/// Converts a CLI failure into a Miette report while preserving structured
+/// spec diagnostics and assigning a stable code to generic failures.
+pub(crate) fn cli_error_report(error: anyhow::Error) -> miette::Report {
+    presentation::cli_error_report(error)
+}
+
 /// Sets how subsequent user-facing notices are emitted by this thread.
-pub fn set_notice_format(format: NoticeFormat) {
+pub(crate) fn set_notice_format(format: NoticeFormat) {
     presentation::set_notice_format(format);
 }
 
 /// Emits a warning notice to stderr using the active notice format.
-pub fn warn(message: impl Into<String>) {
+pub(crate) fn warn(message: impl Into<String>) {
     emit(Notice::warning(message));
 }
 
 /// Emits a warning notice with a stable machine-readable code.
-pub fn warn_with_code(code: &'static str, message: impl Into<String>) {
+pub(crate) fn warn_with_code(code: &'static str, message: impl Into<String>) {
     emit(Notice::warning(message).with_code(code));
 }
 
 /// Emits an informational notice to stderr using the active notice format.
-pub fn notice(message: impl Into<String>) {
+pub(crate) fn notice(message: impl Into<String>) {
     emit(Notice::informational(message));
 }
 
 /// Emits a full notice to stderr using the active notice format.
-pub fn emit(notice: Notice) {
+pub(crate) fn emit(notice: Notice) {
     presentation::emit_notice(notice);
 }
 

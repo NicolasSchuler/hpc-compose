@@ -1,10 +1,63 @@
 use std::cell::Cell;
+use std::fmt::Display;
 use std::io::{self, Write};
 
 use tracing_subscriber::EnvFilter;
 
 use super::{Item, Notice, NoticeFormat, Report};
+use crate::spec_error::SpecError;
 use crate::term;
+
+pub(super) fn cli_error_report(error: anyhow::Error) -> miette::Report {
+    miette::Report::new(CliError(error))
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+struct CliError(anyhow::Error);
+
+impl CliError {
+    fn spec_error(&self) -> Option<&SpecError> {
+        self.0.downcast_ref::<SpecError>()
+    }
+}
+
+impl miette::Diagnostic for CliError {
+    fn code<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
+        self.spec_error()
+            .and_then(|error| error.code())
+            .or_else(|| Some(Box::new("hpc_compose::error")))
+    }
+
+    fn severity(&self) -> Option<miette::Severity> {
+        self.spec_error().and_then(|error| error.severity())
+    }
+
+    fn help<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
+        self.spec_error().and_then(|error| error.help())
+    }
+
+    fn url<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
+        self.spec_error().and_then(|error| error.url())
+    }
+
+    fn source_code(&self) -> Option<&dyn miette::SourceCode> {
+        self.spec_error().and_then(|error| error.source_code())
+    }
+
+    fn labels(&self) -> Option<Box<dyn Iterator<Item = miette::LabeledSpan> + '_>> {
+        self.spec_error().and_then(|error| error.labels())
+    }
+
+    fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn miette::Diagnostic> + 'a>> {
+        self.spec_error().and_then(|error| error.related())
+    }
+
+    fn diagnostic_source(&self) -> Option<&dyn miette::Diagnostic> {
+        self.spec_error()
+            .and_then(|error| error.diagnostic_source())
+    }
+}
 
 thread_local! {
     static NOTICE_FORMAT: Cell<NoticeFormat> = const { Cell::new(NoticeFormat::Text) };
@@ -143,8 +196,93 @@ pub(super) fn emit_notice(notice: Notice) {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+    use std::path::PathBuf;
+
+    use miette::{GraphicalReportHandler, GraphicalTheme};
+
     use super::*;
     use crate::diagnostics::Level;
+    use crate::spec_error::SpecError;
+
+    fn render_cli_report(report: &miette::Report) -> String {
+        let mut rendered = String::new();
+        GraphicalReportHandler::new_themed(GraphicalTheme::unicode_nocolor())
+            .with_width(200)
+            .render_report(&mut rendered, report.as_ref())
+            .expect("render diagnostic");
+        rendered
+    }
+
+    fn source_chain(report: &miette::Report) -> Vec<String> {
+        let mut sources = Vec::new();
+        let mut source = report.source();
+        while let Some(error) = source {
+            sources.push(error.to_string());
+            source = error.source();
+        }
+        sources
+    }
+
+    #[test]
+    fn cli_error_report_preserves_spec_metadata_source_chain_and_rendered_bytes() {
+        let report = cli_error_report(
+            anyhow::Error::from(SpecError::LoadFailed {
+                path: PathBuf::from("missing.yaml"),
+                source: io::Error::new(io::ErrorKind::NotFound, "missing file").into(),
+            })
+            .context("while loading the compose file"),
+        );
+
+        assert_eq!(report.to_string(), "while loading the compose file");
+        assert_eq!(
+            source_chain(&report),
+            vec![
+                "failed to load compose spec from missing.yaml",
+                "missing file",
+            ]
+        );
+        assert_eq!(
+            report.code().expect("diagnostic code").to_string(),
+            "hpc_compose::spec::load_failed"
+        );
+        assert_eq!(
+            report.help().expect("help text").to_string(),
+            "Ensure the file exists and contains valid YAML. Run `hpc-compose schema` to see the expected structure."
+        );
+        assert!(report.source_code().is_none());
+        assert!(report.labels().is_none());
+        assert_eq!(
+            render_cli_report(&report),
+            concat!(
+                "hpc_compose::spec::load_failed\n",
+                "\n",
+                "  × while loading the compose file\n",
+                "  ├─▶ failed to load compose spec from missing.yaml\n",
+                "  ╰─▶ missing file\n",
+                "  help: Ensure the file exists and contains valid YAML. Run `hpc-compose schema` to see the expected structure.\n",
+            )
+        );
+    }
+
+    #[test]
+    fn cli_error_report_preserves_generic_fallback_and_rendered_bytes() {
+        let report = cli_error_report(anyhow::anyhow!("plain failure"));
+
+        assert_eq!(report.to_string(), "plain failure");
+        assert!(source_chain(&report).is_empty());
+        assert_eq!(
+            report.code().expect("generic code").to_string(),
+            "hpc_compose::error"
+        );
+        assert!(report.help().is_none());
+        assert!(report.source_code().is_none());
+        assert!(report.labels().is_none());
+        assert_eq!(
+            render_cli_report(&report),
+            "hpc_compose::error\n\n  × plain failure\n"
+        );
+    }
 
     #[test]
     fn report_rendering_preserves_exact_plain_and_ansi_contracts() {

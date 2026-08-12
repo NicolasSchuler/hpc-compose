@@ -9,6 +9,6 @@
 /// Returns `true` when the current host is macOS, which `hpc-compose` supports
 /// for authoring only (not for runtime submission).
 #[must_use]
-pub fn is_macos() -> bool {
+pub(crate) fn is_macos() -> bool {
     cfg!(target_os = "macos")
 }

@@ -13,13 +13,13 @@ use crate::context::ResolvedBinaries;
 use crate::time_util::unix_timestamp_now;
 
 #[derive(Debug, Clone)]
-pub struct WeatherOptions<'a> {
+pub(crate) struct WeatherOptions<'a> {
     pub binaries: &'a ResolvedBinaries,
     pub cwd: &'a Path,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
-pub struct WeatherReport {
+pub(crate) struct WeatherReport {
     pub timestamp_unix: u64,
     pub cluster: Option<String>,
     pub condition: WeatherCondition,
@@ -34,7 +34,7 @@ pub struct WeatherReport {
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum WeatherCondition {
+pub(crate) enum WeatherCondition {
     Clear,
     PartlyBusy,
     Busy,
@@ -44,7 +44,7 @@ pub enum WeatherCondition {
 
 impl WeatherCondition {
     #[must_use]
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Clear => "Clear",
             Self::PartlyBusy => "Partly Busy",
@@ -56,7 +56,7 @@ impl WeatherCondition {
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct NodeSummary {
+pub(crate) struct NodeSummary {
     pub total_nodes: u32,
     pub free_nodes: u32,
     pub unavailable_nodes: u32,
@@ -65,13 +65,13 @@ pub struct NodeSummary {
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct NodeClassSummary {
+pub(crate) struct NodeClassSummary {
     pub total_nodes: u32,
     pub free_nodes: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct GpuSummary {
+pub(crate) struct GpuSummary {
     pub total_nodes: u32,
     pub free_nodes: u32,
     pub total_devices: u32,
@@ -80,7 +80,7 @@ pub struct GpuSummary {
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct GpuModelSummary {
+pub(crate) struct GpuModelSummary {
     pub model: String,
     pub total_nodes: u32,
     pub free_nodes: u32,
@@ -89,7 +89,7 @@ pub struct GpuModelSummary {
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct QueueSummary {
+pub(crate) struct QueueSummary {
     pub total_jobs: u32,
     pub running_jobs: u32,
     pub pending_jobs: u32,
@@ -99,7 +99,7 @@ pub struct QueueSummary {
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct UserJobSummary {
+pub(crate) struct UserJobSummary {
     pub user: Option<String>,
     pub total_jobs: u32,
     pub running_jobs: u32,
@@ -108,14 +108,14 @@ pub struct UserJobSummary {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
-pub struct FairshareSummary {
+pub(crate) struct FairshareSummary {
     pub account: Option<String>,
     pub user: Option<String>,
     pub fairshare: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
-pub struct PrioritySummary {
+pub(crate) struct PrioritySummary {
     pub pending_jobs: u32,
     pub top_job_id: Option<String>,
     pub highest_priority: Option<i64>,
@@ -123,7 +123,7 @@ pub struct PrioritySummary {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct MaintenanceNote {
+pub(crate) struct MaintenanceNote {
     pub partition: Option<String>,
     pub state: String,
     pub nodes: u32,
@@ -131,7 +131,7 @@ pub struct MaintenanceNote {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StartEstimate {
+pub(crate) struct StartEstimate {
     pub average_wait_seconds: u64,
     pub sample_count: u32,
 }
@@ -156,7 +156,7 @@ struct GresGpu {
     count: u32,
 }
 
-pub fn collect_weather(options: &WeatherOptions<'_>) -> Result<WeatherReport> {
+pub(crate) fn collect_weather(options: &WeatherOptions<'_>) -> Result<WeatherReport> {
     let timestamp_unix = unix_timestamp_now();
     let mut warnings = Vec::new();
     let profile = load_discovered_cluster_profile(options.cwd, &mut warnings);
@@ -385,7 +385,7 @@ fn parse_squeue(raw: &str, user: Option<&str>) -> ParsedQueue {
     parsed
 }
 
-pub fn parse_squeue_start(raw: &str, now_unix: u64) -> Option<StartEstimate> {
+pub(crate) fn parse_squeue_start(raw: &str, now_unix: u64) -> Option<StartEstimate> {
     let waits = raw
         .lines()
         .filter_map(|line| line.split_whitespace().next())
@@ -402,7 +402,7 @@ pub fn parse_squeue_start(raw: &str, now_unix: u64) -> Option<StartEstimate> {
     })
 }
 
-pub fn parse_sshare(raw: &str, user: Option<&str>) -> Option<FairshareSummary> {
+pub(crate) fn parse_sshare(raw: &str, user: Option<&str>) -> Option<FairshareSummary> {
     let mut first = None;
     for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
         let fields = line.split('|').map(str::trim).collect::<Vec<_>>();
@@ -422,7 +422,7 @@ pub fn parse_sshare(raw: &str, user: Option<&str>) -> Option<FairshareSummary> {
     first
 }
 
-pub fn parse_sprio(raw: &str) -> Option<PrioritySummary> {
+pub(crate) fn parse_sprio(raw: &str) -> Option<PrioritySummary> {
     let mut pending_jobs = 0_u32;
     let mut top_job_id = None;
     let mut highest_priority = None;
@@ -456,7 +456,7 @@ pub fn parse_sprio(raw: &str) -> Option<PrioritySummary> {
 }
 
 #[must_use]
-pub fn condition_for_nodes(nodes: Option<&NodeSummary>) -> WeatherCondition {
+pub(crate) fn condition_for_nodes(nodes: Option<&NodeSummary>) -> WeatherCondition {
     let Some(nodes) = nodes else {
         return WeatherCondition::Unknown;
     };

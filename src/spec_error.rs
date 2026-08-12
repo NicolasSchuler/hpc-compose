@@ -1,4 +1,3 @@
-use std::fmt::Display;
 use std::path::PathBuf;
 
 /// Marks a generic parsing or validation failure as originating from a compose
@@ -359,57 +358,6 @@ pub(crate) enum SpecError {
     SpecFileNotFound { path: PathBuf },
 }
 
-pub(crate) fn cli_error_report(error: anyhow::Error) -> miette::Report {
-    miette::Report::new(CliError(error))
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error(transparent)]
-struct CliError(anyhow::Error);
-
-impl CliError {
-    fn spec_error(&self) -> Option<&SpecError> {
-        self.0.downcast_ref::<SpecError>()
-    }
-}
-
-impl miette::Diagnostic for CliError {
-    fn code<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
-        self.spec_error()
-            .and_then(|error| error.code())
-            .or_else(|| Some(Box::new("hpc_compose::error")))
-    }
-
-    fn severity(&self) -> Option<miette::Severity> {
-        self.spec_error().and_then(|error| error.severity())
-    }
-
-    fn help<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
-        self.spec_error().and_then(|error| error.help())
-    }
-
-    fn url<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
-        self.spec_error().and_then(|error| error.url())
-    }
-
-    fn source_code(&self) -> Option<&dyn miette::SourceCode> {
-        self.spec_error().and_then(|error| error.source_code())
-    }
-
-    fn labels(&self) -> Option<Box<dyn Iterator<Item = miette::LabeledSpan> + '_>> {
-        self.spec_error().and_then(|error| error.labels())
-    }
-
-    fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn miette::Diagnostic> + 'a>> {
-        self.spec_error().and_then(|error| error.related())
-    }
-
-    fn diagnostic_source(&self) -> Option<&dyn miette::Diagnostic> {
-        self.spec_error()
-            .and_then(|error| error.diagnostic_source())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::error::Error as _;
@@ -460,38 +408,6 @@ mod tests {
 
         assert!(marked_twice.downcast_ref::<SpecValidationError>().is_some());
         assert_eq!(format!("{marked_twice:#}"), expected_chain);
-    }
-
-    #[test]
-    fn cli_error_report_preserves_inner_spec_diagnostic_metadata() {
-        let report = cli_error_report(
-            anyhow::Error::from(load_failed_error()).context("while loading the compose file"),
-        );
-
-        assert_eq!(report.to_string(), "while loading the compose file");
-        assert_eq!(
-            report.code().expect("diagnostic code").to_string(),
-            "hpc_compose::spec::load_failed"
-        );
-        assert!(
-            report
-                .help()
-                .expect("help text")
-                .to_string()
-                .contains("Ensure the file exists")
-        );
-    }
-
-    #[test]
-    fn cli_error_report_keeps_generic_errors_generic() {
-        let report = cli_error_report(anyhow::anyhow!("plain failure"));
-
-        assert_eq!(report.to_string(), "plain failure");
-        assert_eq!(
-            report.code().expect("generic code").to_string(),
-            "hpc_compose::error"
-        );
-        assert!(report.help().is_none());
     }
 
     #[test]

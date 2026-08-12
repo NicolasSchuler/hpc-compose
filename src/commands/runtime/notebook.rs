@@ -22,7 +22,7 @@ pub(crate) use crate::output::runtime::NotebookConnectionOutput;
 /// Which interactive server preset to launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum NotebookKind {
+pub(crate) enum NotebookKind {
     /// JupyterLab notebook server.
     #[default]
     Jupyter,
@@ -33,7 +33,7 @@ pub enum NotebookKind {
 impl NotebookKind {
     /// Returns the stable preset label.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Jupyter => "jupyter",
             Self::VsCode => "vscode",
@@ -43,7 +43,7 @@ impl NotebookKind {
 
 /// Resolved notebook options produced from CLI flags.
 #[derive(Debug, Clone)]
-pub struct NotebookArgs {
+pub(crate) struct NotebookArgs {
     pub kind: NotebookKind,
     /// Override image; when `None`, the preset default is used (vscode has no
     /// default and requires an explicit image).
@@ -62,7 +62,7 @@ pub struct NotebookArgs {
 
 /// One notebook preset.
 #[derive(Debug, Clone)]
-pub struct NotebookPreset {
+pub(crate) struct NotebookPreset {
     pub kind: NotebookKind,
     pub default_image: Option<&'static str>,
     /// Regex matched against the service log to confirm the server is up.
@@ -76,7 +76,7 @@ pub struct NotebookPreset {
 
 /// Returns the preset for a given kind.
 #[must_use]
-pub fn preset_for(kind: NotebookKind) -> NotebookPreset {
+pub(crate) fn preset_for(kind: NotebookKind) -> NotebookPreset {
     match kind {
         NotebookKind::Jupyter => NotebookPreset {
             kind,
@@ -102,7 +102,7 @@ pub fn preset_for(kind: NotebookKind) -> NotebookPreset {
 }
 
 /// Resolves the effective image, bailing when a required one is missing.
-pub fn resolve_image(args: &NotebookArgs, preset: &NotebookPreset) -> Result<String> {
+pub(crate) fn resolve_image(args: &NotebookArgs, preset: &NotebookPreset) -> Result<String> {
     if let Some(image) = args.image.clone() {
         if image.trim().is_empty() {
             bail!("--image requires a non-empty image");
@@ -120,7 +120,7 @@ pub fn resolve_image(args: &NotebookArgs, preset: &NotebookPreset) -> Result<Str
 
 /// Builds the server command for the preset.
 #[must_use]
-pub fn build_server_command(args: &NotebookArgs, token: &str) -> Vec<String> {
+pub(crate) fn build_server_command(args: &NotebookArgs, token: &str) -> Vec<String> {
     let mut command = match args.kind {
         NotebookKind::Jupyter => vec![
             "jupyter".to_string(),
@@ -150,7 +150,7 @@ pub fn build_server_command(args: &NotebookArgs, token: &str) -> Vec<String> {
 
 /// Returns the readiness probe to attach to the synthesized service.
 #[must_use]
-pub fn readiness_spec(preset: &NotebookPreset) -> ReadinessSpec {
+pub(crate) fn readiness_spec(preset: &NotebookPreset) -> ReadinessSpec {
     ReadinessSpec::Log {
         pattern: preset.readiness_log_pattern.to_string(),
         timeout_seconds: None,
@@ -159,7 +159,7 @@ pub fn readiness_spec(preset: &NotebookPreset) -> ReadinessSpec {
 
 /// Builds the synthesized notebook service spec.
 #[must_use]
-pub fn build_notebook_service_spec(
+pub(crate) fn build_notebook_service_spec(
     args: &NotebookArgs,
     image: &str,
     command: Vec<String>,
@@ -191,7 +191,7 @@ pub fn build_notebook_service_spec(
 
 /// The connection information printed to the user once the server is ready.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NotebookConnection {
+pub(crate) struct NotebookConnection {
     /// The URL the user should open (already rewritten to localhost for
     /// Jupyter, or the scraped vscode.dev link).
     pub url: String,
@@ -205,7 +205,7 @@ pub struct NotebookConnection {
 /// points at `127.0.0.1` (what the user reaches after tunneling). On Slurm a
 /// tunnel hint is added. VS Code: the URL is scraped from the log and no
 /// tunnel is needed.
-pub fn build_connection(
+pub(crate) fn build_connection(
     args: &NotebookArgs,
     preset: &NotebookPreset,
     token: &str,
@@ -256,7 +256,7 @@ pub fn build_connection(
 /// node that requires an OTP/2FA prompts only once for the whole laptop session
 /// instead of charging a fresh prompt for the notebook tunnel.
 #[must_use]
-pub fn jupyter_tunnel_hint(
+pub(crate) fn jupyter_tunnel_hint(
     port: u16,
     compute_node: Option<&str>,
     login_node: Option<&str>,
@@ -272,7 +272,7 @@ pub fn jupyter_tunnel_hint(
 
 /// Builds the machine-readable connection output. Pure; opens no connection.
 #[must_use]
-pub fn build_connection_output(
+pub(crate) fn build_connection_output(
     connection: &NotebookConnection,
     compute_node: Option<&str>,
     login_host: Option<&str>,
@@ -297,7 +297,7 @@ pub fn build_connection_output(
 /// Generates an opaque random-looking hex token. Not cryptographically strong;
 /// its job is only to keep an interactive notebook URL unguessable.
 #[must_use]
-pub fn generate_token() -> String {
+pub(crate) fn generate_token() -> String {
     let mut digest = Sha256::new();
     digest.update(
         SystemTime::now()
