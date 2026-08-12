@@ -7,8 +7,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::domain::{
-    MountParts, RendezvousNameIssue, parse_node_index_ranges, rendezvous_env_token_collision,
-    rendezvous_name_issue, split_mount_parts,
+    MountParts, RendezvousNameIssue, is_ascii_identifier, parse_node_index_ranges,
+    rendezvous_env_token_collision, rendezvous_name_issue, split_mount_parts,
 };
 use crate::spec_error::SpecError;
 use crate::suggest;
@@ -1506,6 +1506,17 @@ pub enum ServiceFailureMode {
     RestartOnFailure,
 }
 
+impl ServiceFailureMode {
+    /// Returns the stable label used in rendered scripts and runtime state.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::FailJob => "fail_job",
+            Self::Ignore => "ignore",
+            Self::RestartOnFailure => "restart_on_failure",
+        }
+    }
+}
+
 /// Raw per-service failure policy declaration under `x-slurm.failure_policy`.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
@@ -2639,14 +2650,10 @@ fn validate_software_env_string(value: &str, field: &str) -> Result<()> {
 }
 
 fn validate_safe_env_name(name: &str, field: &str) -> Result<()> {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
+    if name.is_empty() {
         bail!("{field} contains an empty environment variable name");
-    };
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        bail!("{field}.{name} is not a safe environment variable name");
     }
-    if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+    if !is_ascii_identifier(name) {
         bail!("{field}.{name} is not a safe environment variable name");
     }
     Ok(())

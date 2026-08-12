@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::NotebookCommands;
+use hpc_compose::domain::is_ascii_identifier;
 use hpc_compose::job::{SubmissionKind, SubmissionRecord};
 use serde_norway::{Mapping, Value};
 
@@ -299,13 +300,10 @@ fn parse_params(params: &[String]) -> Result<Vec<(String, String)>> {
 }
 
 fn validate_param_name(name: &str) -> Result<()> {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
+    if name.is_empty() {
         bail!("--param name must not be empty");
-    };
-    if !(first == '_' || first.is_ascii_alphabetic())
-        || !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-    {
+    }
+    if !is_ascii_identifier(name) {
         bail!("--param name '{name}' must match [A-Za-z_][A-Za-z0-9_]*");
     }
     Ok(())
@@ -507,6 +505,29 @@ fn key(name: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ascii_identifier_policy_preserves_notebook_param_diagnostics() {
+        for &(name, expected_valid) in crate::domain::ASCII_IDENTIFIER_NAME_CASES {
+            let result = validate_param_name(name);
+            if expected_valid {
+                result.unwrap_or_else(|error| panic!("name {name:?} should be valid: {error}"));
+            } else {
+                let expected = if name.is_empty() {
+                    "--param name must not be empty".to_string()
+                } else {
+                    format!("--param name '{name}' must match [A-Za-z_][A-Za-z0-9_]*")
+                };
+                assert_eq!(
+                    result
+                        .expect_err("invalid notebook parameter name")
+                        .to_string(),
+                    expected,
+                    "name {name:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn requirements_mentions_papermill_accepts_common_pins() {

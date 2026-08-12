@@ -7,6 +7,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde_norway::Value;
 
+use crate::domain::{ascii_identifier_continue, ascii_identifier_start};
 use crate::dotenv::{DotenvLineError, parse_dotenv_lines};
 use crate::spec_error::SpecError;
 
@@ -146,12 +147,12 @@ fn collect_referenced_variables_in_string(
         }
 
         index += 1;
-        if !matches!(chars.get(index), Some(ch) if is_var_start(*ch)) {
+        if !matches!(chars.get(index), Some(ch) if ascii_identifier_start(*ch)) {
             continue;
         }
         let mut name = String::new();
         while let Some(ch) = chars.get(index) {
-            if is_var_char(*ch) {
+            if ascii_identifier_continue(*ch) {
                 name.push(*ch);
                 index += 1;
             } else {
@@ -163,6 +164,63 @@ fn collect_referenced_variables_in_string(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum BracedExpressionOperator {
+    Direct,
+    RequiredNonEmpty,
+    DefaultIfUnsetOrEmpty,
+    RequiredIfUnset,
+    DefaultIfUnset,
+}
+
+struct ParsedBracedExpression<'a> {
+    name: &'a str,
+    operator: BracedExpressionOperator,
+    operand: &'a str,
+}
+
+enum BracedExpressionParseError {
+    InvalidName,
+    UnsupportedOperator,
+}
+
+fn parse_braced_expression(
+    expr: &str,
+) -> Result<ParsedBracedExpression<'_>, BracedExpressionParseError> {
+    let mut chars = expr.char_indices();
+    let Some((_, first)) = chars.next() else {
+        return Err(BracedExpressionParseError::InvalidName);
+    };
+    if !ascii_identifier_start(first) {
+        return Err(BracedExpressionParseError::InvalidName);
+    }
+    let name_end = chars
+        .find_map(|(index, ch)| (!ascii_identifier_continue(ch)).then_some(index))
+        .unwrap_or(expr.len());
+    let name = &expr[..name_end];
+    let suffix = &expr[name_end..];
+
+    let (operator, operand) = if suffix.is_empty() {
+        (BracedExpressionOperator::Direct, "")
+    } else if let Some(operand) = suffix.strip_prefix(":?") {
+        (BracedExpressionOperator::RequiredNonEmpty, operand)
+    } else if let Some(operand) = suffix.strip_prefix(":-") {
+        (BracedExpressionOperator::DefaultIfUnsetOrEmpty, operand)
+    } else if let Some(operand) = suffix.strip_prefix('?') {
+        (BracedExpressionOperator::RequiredIfUnset, operand)
+    } else if let Some(operand) = suffix.strip_prefix('-') {
+        (BracedExpressionOperator::DefaultIfUnset, operand)
+    } else {
+        return Err(BracedExpressionParseError::UnsupportedOperator);
+    };
+
+    Ok(ParsedBracedExpression {
+        name,
+        operator,
+        operand,
+    })
+}
+
 fn collect_referenced_from_braced_expr(
     expr: &str,
     vars: &BTreeMap<String, String>,
@@ -170,49 +228,46 @@ fn collect_referenced_from_braced_expr(
     input: &str,
     start: usize,
 ) -> Result<()> {
-    let mut chars = expr.chars();
-    let Some(first) = chars.next() else {
-        bail!("invalid variable expression in '{}'", &input[start..]);
-    };
-    if !is_var_start(first) {
-        bail!("invalid variable expression in '{}'", &input[start..]);
-    }
-    let name_len = 1 + chars.take_while(|ch| is_var_char(*ch)).count();
-    let name = &expr[..name_len];
-    let suffix = &expr[name_len..];
-    out.insert(name.to_string());
+    let parsed = parse_braced_expression(expr).map_err(|error| match error {
+        BracedExpressionParseError::InvalidName => {
+            anyhow::anyhow!("invalid variable expression in '{}'", &input[start..])
+        }
+        BracedExpressionParseError::UnsupportedOperator => {
+            anyhow::anyhow!("invalid variable expression '${{{expr}}}' in '{input}'")
+        }
+    })?;
+    out.insert(parsed.name.to_string());
 
-    match suffix {
-        "" => {}
-        _ if suffix.starts_with(":?") => {
-            let required_but_missing = match vars.get(name) {
+    match parsed.operator {
+        BracedExpressionOperator::Direct => {}
+        BracedExpressionOperator::RequiredNonEmpty => {
+            let required_but_missing = match vars.get(parsed.name) {
                 Some(value) => value.is_empty(),
                 None => true,
             };
             if required_but_missing {
-                collect_referenced_variables_in_string(&suffix[2..], vars, out)?;
+                collect_referenced_variables_in_string(parsed.operand, vars, out)?;
             }
         }
-        _ if suffix.starts_with(":-") => {
-            let default_used = match vars.get(name) {
+        BracedExpressionOperator::DefaultIfUnsetOrEmpty => {
+            let default_used = match vars.get(parsed.name) {
                 Some(value) => value.is_empty(),
                 None => true,
             };
             if default_used {
-                collect_referenced_variables_in_string(&suffix[2..], vars, out)?;
+                collect_referenced_variables_in_string(parsed.operand, vars, out)?;
             }
         }
-        _ if suffix.starts_with('?') => {
-            if !vars.contains_key(name) {
-                collect_referenced_variables_in_string(&suffix[1..], vars, out)?;
+        BracedExpressionOperator::RequiredIfUnset => {
+            if !vars.contains_key(parsed.name) {
+                collect_referenced_variables_in_string(parsed.operand, vars, out)?;
             }
         }
-        _ if suffix.starts_with('-') => {
-            if !vars.contains_key(name) {
-                collect_referenced_variables_in_string(&suffix[1..], vars, out)?;
+        BracedExpressionOperator::DefaultIfUnset => {
+            if !vars.contains_key(parsed.name) {
+                collect_referenced_variables_in_string(parsed.operand, vars, out)?;
             }
         }
-        _ => bail!("invalid variable expression '${{{expr}}}' in '{input}'"),
     }
     Ok(())
 }
@@ -334,14 +389,14 @@ pub(super) fn interpolate_string(input: &str, vars: &InterpolationVars) -> Resul
         }
 
         index += 1;
-        if !matches!(chars.get(index), Some(ch) if is_var_start(*ch)) {
+        if !matches!(chars.get(index), Some(ch) if ascii_identifier_start(*ch)) {
             out.push('$');
             continue;
         }
 
         let mut name = String::new();
         while let Some(ch) = chars.get(index) {
-            if is_var_char(*ch) {
+            if ascii_identifier_continue(*ch) {
                 name.push(*ch);
                 index += 1;
             } else {
@@ -405,44 +460,38 @@ fn resolve_braced_variable(
     input: &str,
     start: usize,
 ) -> Result<String> {
-    let mut chars = expr.chars();
-    let Some(first) = chars.next() else {
-        bail!("invalid variable expression in '{}'", &input[start..]);
-    };
-    if !is_var_start(first) {
-        bail!("invalid variable expression in '{}'", &input[start..]);
-    }
-    let name_len = 1 + chars.take_while(|ch| is_var_char(*ch)).count();
-    let name = &expr[..name_len];
-    let suffix = &expr[name_len..];
+    let parsed = parse_braced_expression(expr).map_err(|error| match error {
+        BracedExpressionParseError::InvalidName => {
+            anyhow::anyhow!("invalid variable expression in '{}'", &input[start..])
+        }
+        BracedExpressionParseError::UnsupportedOperator => {
+            anyhow::anyhow!("invalid variable expression '${{{expr}}}' in '{input}'")
+        }
+    })?;
 
-    match suffix {
-        "" => resolve_required_variable(name, vars),
-        _ if suffix.starts_with(":?") => {
-            resolve_required_variable_with_message(name, &suffix[2..], vars, true)
+    match parsed.operator {
+        BracedExpressionOperator::Direct => resolve_required_variable(parsed.name, vars),
+        BracedExpressionOperator::RequiredNonEmpty => {
+            resolve_required_variable_with_message(parsed.name, parsed.operand, vars, true)
         }
-        _ if suffix.starts_with(":-") => {
-            let default = &suffix[2..];
-            match vars.get(name) {
-                Some(value) if !value.is_empty() => Ok(value.clone()),
-                Some(_) => interpolate_string(default, vars),
-                None => {
-                    record_missing_default(name);
-                    interpolate_string(default, vars)
-                }
-            }
-        }
-        _ if suffix.starts_with('?') => {
-            resolve_required_variable_with_message(name, &suffix[1..], vars, false)
-        }
-        _ if suffix.starts_with('-') => match vars.get(name) {
-            Some(value) => Ok(value.clone()),
+        BracedExpressionOperator::DefaultIfUnsetOrEmpty => match vars.get(parsed.name) {
+            Some(value) if !value.is_empty() => Ok(value.clone()),
+            Some(_) => interpolate_string(parsed.operand, vars),
             None => {
-                record_missing_default(name);
-                interpolate_string(&suffix[1..], vars)
+                record_missing_default(parsed.name);
+                interpolate_string(parsed.operand, vars)
             }
         },
-        _ => bail!("invalid variable expression '${{{expr}}}' in '{input}'"),
+        BracedExpressionOperator::RequiredIfUnset => {
+            resolve_required_variable_with_message(parsed.name, parsed.operand, vars, false)
+        }
+        BracedExpressionOperator::DefaultIfUnset => match vars.get(parsed.name) {
+            Some(value) => Ok(value.clone()),
+            None => {
+                record_missing_default(parsed.name);
+                interpolate_string(parsed.operand, vars)
+            }
+        },
     }
 }
 
@@ -502,17 +551,241 @@ fn resolve_required_variable_with_message(
     .into())
 }
 
-fn is_var_start(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphabetic()
-}
-
-fn is_var_char(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphanumeric()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Copy)]
+    enum Expected<'a, T> {
+        Ok(T),
+        Err(&'a str),
+    }
+
+    #[test]
+    fn braced_expression_table_preserves_resolution_and_reference_scanning() {
+        struct Case {
+            label: &'static str,
+            input: &'static str,
+            vars: &'static [(&'static str, &'static str)],
+            interpolation: Expected<'static, &'static str>,
+            references: Expected<'static, &'static [&'static str]>,
+        }
+
+        const SET_EMPTY_NESTED: &[(&str, &str)] =
+            &[("SET", "value"), ("EMPTY", ""), ("NESTED", "nested")];
+        const SET_EMPTY: &[(&str, &str)] = &[("SET", "value"), ("EMPTY", "")];
+        const NO_VARS: &[(&str, &str)] = &[];
+        const SET_REF: &[&str] = &["SET"];
+        const EMPTY_REF: &[&str] = &["EMPTY"];
+        const UNSET_REF: &[&str] = &["UNSET"];
+        const EMPTY_NESTED_REFS: &[&str] = &["EMPTY", "NESTED"];
+        const UNSET_NESTED_REFS: &[&str] = &["UNSET", "NESTED"];
+
+        let cases = [
+            Case {
+                label: "direct set",
+                input: "${SET}",
+                vars: SET_EMPTY,
+                interpolation: Expected::Ok("value"),
+                references: Expected::Ok(SET_REF),
+            },
+            Case {
+                label: "direct empty",
+                input: "${EMPTY}",
+                vars: SET_EMPTY,
+                interpolation: Expected::Ok(""),
+                references: Expected::Ok(EMPTY_REF),
+            },
+            Case {
+                label: "direct unset",
+                input: "${UNSET}",
+                vars: NO_VARS,
+                interpolation: Expected::Err("missing variable 'UNSET'"),
+                references: Expected::Ok(UNSET_REF),
+            },
+            Case {
+                label: "colon question set skips malformed message",
+                input: "${SET:?${}}",
+                vars: SET_EMPTY,
+                interpolation: Expected::Ok("value"),
+                references: Expected::Ok(SET_REF),
+            },
+            Case {
+                label: "colon question empty traverses nested message",
+                input: "${EMPTY:?empty ${NESTED:-fallback}}",
+                vars: SET_EMPTY_NESTED,
+                interpolation: Expected::Err("'EMPTY' is required: empty nested"),
+                references: Expected::Ok(EMPTY_NESTED_REFS),
+            },
+            Case {
+                label: "colon question unset traverses nested message default",
+                input: "${UNSET:?unset ${NESTED:-fallback}}",
+                vars: SET_EMPTY,
+                interpolation: Expected::Err("'UNSET' is required: unset fallback"),
+                references: Expected::Ok(UNSET_NESTED_REFS),
+            },
+            Case {
+                label: "colon dash set skips malformed default",
+                input: "${SET:-${}}",
+                vars: SET_EMPTY,
+                interpolation: Expected::Ok("value"),
+                references: Expected::Ok(SET_REF),
+            },
+            Case {
+                label: "colon dash empty traverses nested default",
+                input: "${EMPTY:-empty ${NESTED:-fallback}}",
+                vars: SET_EMPTY_NESTED,
+                interpolation: Expected::Ok("empty nested"),
+                references: Expected::Ok(EMPTY_NESTED_REFS),
+            },
+            Case {
+                label: "colon dash unset traverses nested default",
+                input: "${UNSET:-unset ${NESTED:-fallback}}",
+                vars: SET_EMPTY,
+                interpolation: Expected::Ok("unset fallback"),
+                references: Expected::Ok(UNSET_NESTED_REFS),
+            },
+            Case {
+                label: "question set skips malformed message",
+                input: "${SET?${}}",
+                vars: SET_EMPTY,
+                interpolation: Expected::Ok("value"),
+                references: Expected::Ok(SET_REF),
+            },
+            Case {
+                label: "question empty skips malformed message",
+                input: "${EMPTY?${}}",
+                vars: SET_EMPTY,
+                interpolation: Expected::Ok(""),
+                references: Expected::Ok(EMPTY_REF),
+            },
+            Case {
+                label: "question unset traverses nested message default",
+                input: "${UNSET?unset ${NESTED:-fallback}}",
+                vars: SET_EMPTY,
+                interpolation: Expected::Err("'UNSET' is required: unset fallback"),
+                references: Expected::Ok(UNSET_NESTED_REFS),
+            },
+            Case {
+                label: "dash set skips malformed default",
+                input: "${SET-${}}",
+                vars: SET_EMPTY,
+                interpolation: Expected::Ok("value"),
+                references: Expected::Ok(SET_REF),
+            },
+            Case {
+                label: "dash empty skips malformed default",
+                input: "${EMPTY-${}}",
+                vars: SET_EMPTY,
+                interpolation: Expected::Ok(""),
+                references: Expected::Ok(EMPTY_REF),
+            },
+            Case {
+                label: "dash unset traverses nested default",
+                input: "${UNSET-unset ${NESTED:-fallback}}",
+                vars: SET_EMPTY,
+                interpolation: Expected::Ok("unset fallback"),
+                references: Expected::Ok(UNSET_NESTED_REFS),
+            },
+            Case {
+                label: "empty expression",
+                input: "${}",
+                vars: NO_VARS,
+                interpolation: Expected::Err("invalid variable expression in '${}'"),
+                references: Expected::Err("invalid variable expression in '${}'"),
+            },
+            Case {
+                label: "invalid name",
+                input: "${1BAD}",
+                vars: NO_VARS,
+                interpolation: Expected::Err("invalid variable expression in '${1BAD}'"),
+                references: Expected::Err("invalid variable expression in '${1BAD}'"),
+            },
+            Case {
+                label: "unsupported operator",
+                input: "${SET:+alternate}",
+                vars: SET_EMPTY,
+                interpolation: Expected::Err(
+                    "invalid variable expression '${SET:+alternate}' in '${SET:+alternate}'",
+                ),
+                references: Expected::Err(
+                    "invalid variable expression '${SET:+alternate}' in '${SET:+alternate}'",
+                ),
+            },
+            Case {
+                label: "unterminated expression",
+                input: "${SET",
+                vars: SET_EMPTY,
+                interpolation: Expected::Err("unterminated variable expression in '${SET'"),
+                references: Expected::Err("unterminated variable expression in '${SET'"),
+            },
+            Case {
+                label: "unterminated nested expression",
+                input: "${SET:-${NESTED}",
+                vars: SET_EMPTY_NESTED,
+                interpolation: Expected::Err(
+                    "unterminated variable expression in '${SET:-${NESTED}'",
+                ),
+                references: Expected::Err("unterminated variable expression in '${SET:-${NESTED}'"),
+            },
+            Case {
+                label: "taken malformed nested default",
+                input: "${UNSET:-${}}",
+                vars: NO_VARS,
+                interpolation: Expected::Err("invalid variable expression in '${}'"),
+                references: Expected::Err("invalid variable expression in '${}'"),
+            },
+        ];
+
+        for case in cases {
+            let vars = case
+                .vars
+                .iter()
+                .map(|&(key, value)| (key.to_string(), value.to_string()))
+                .collect::<BTreeMap<_, _>>();
+
+            match case.interpolation {
+                Expected::Ok(expected) => assert_eq!(
+                    interpolate_string(case.input, &vars)
+                        .unwrap_or_else(|error| panic!("{}: {error}", case.label)),
+                    expected,
+                    "{} interpolation",
+                    case.label
+                ),
+                Expected::Err(expected) => assert_eq!(
+                    interpolate_string(case.input, &vars)
+                        .expect_err(case.label)
+                        .to_string(),
+                    expected,
+                    "{} interpolation error",
+                    case.label
+                ),
+            }
+
+            let mut references = BTreeSet::new();
+            let result = collect_referenced_variables_in_string(case.input, &vars, &mut references);
+            match case.references {
+                Expected::Ok(expected) => {
+                    result.unwrap_or_else(|error| panic!("{}: {error}", case.label));
+                    assert_eq!(
+                        references,
+                        expected
+                            .iter()
+                            .map(|name| (*name).to_string())
+                            .collect::<BTreeSet<_>>(),
+                        "{} references",
+                        case.label
+                    );
+                }
+                Expected::Err(expected) => assert_eq!(
+                    result.expect_err(case.label).to_string(),
+                    expected,
+                    "{} reference error",
+                    case.label
+                ),
+            }
+        }
+    }
 
     #[test]
     fn dotenv_loader_handles_quotes_exports_missing_and_parse_errors() {
@@ -695,6 +968,42 @@ mod tests {
                 "{input} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn ascii_identifier_policy_preserves_interpolation_scanning() {
+        for &(name, expected) in crate::domain::ASCII_IDENTIFIER_NAME_CASES {
+            let mut chars = name.chars();
+            let actual = chars.next().is_some_and(|first| {
+                ascii_identifier_start(first) && chars.all(ascii_identifier_continue)
+            });
+            assert_eq!(actual, expected, "name {name:?}");
+        }
+
+        let vars = BTreeMap::from([
+            ("_".to_string(), "under".to_string()),
+            ("A".to_string(), "a".to_string()),
+            ("A0".to_string(), "a0".to_string()),
+            ("A_B9".to_string(), "token".to_string()),
+        ]);
+        let input = "$_/$A.$A0:$A_B9 $9 $é $- $";
+        assert_eq!(
+            interpolate_string(input, &vars).expect("bare interpolation"),
+            "under/a.a0:token $9 $é $- $"
+        );
+
+        let mut referenced = BTreeSet::new();
+        collect_referenced_variables_in_string(input, &vars, &mut referenced)
+            .expect("bare reference scan");
+        assert_eq!(
+            referenced,
+            BTreeSet::from([
+                "_".to_string(),
+                "A".to_string(),
+                "A0".to_string(),
+                "A_B9".to_string(),
+            ])
+        );
     }
 
     #[test]

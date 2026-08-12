@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -469,10 +468,7 @@ fn unique_temp_path(path: &Path, attempt: u32) -> PathBuf {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("rendezvous.json");
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
+    let nanos = time_util::unix_timestamp_nanos();
     path.with_file_name(format!(
         ".{file_name}.{}.{}.{}.tmp",
         std::process::id(),
@@ -831,5 +827,22 @@ mod tests {
             .as_secs();
         let now = unix_timestamp_now();
         assert!(now >= before);
+    }
+
+    #[test]
+    fn atomic_temp_path_preserves_sibling_filename_shape() {
+        let target = Path::new("/shared/cache/latest.json");
+        let temp = unique_temp_path(target, 7);
+
+        assert_eq!(temp.parent(), target.parent());
+        let filename = temp
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("UTF-8 temp filename");
+        let timestamp = filename
+            .strip_prefix(&format!(".latest.json.{}.", std::process::id()))
+            .and_then(|suffix| suffix.strip_suffix(".7.tmp"))
+            .expect("exact temp filename shape");
+        assert!(timestamp.parse::<u128>().is_ok());
     }
 }

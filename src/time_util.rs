@@ -16,6 +16,13 @@ pub(crate) fn unix_timestamp_now() -> u64 {
     system_time_to_unix(SystemTime::now()).unwrap_or(0)
 }
 
+pub(crate) fn unix_timestamp_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
 pub(crate) fn unix_timestamp_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

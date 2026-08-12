@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::process_probe;
 use crate::runtime_plan::RuntimePlan;
@@ -356,10 +356,7 @@ fn read_failed_probe_message(probe_root: &Path) -> Option<String> {
 }
 
 fn shared_fs_probe_id() -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default();
+    let millis = crate::time_util::unix_timestamp_millis();
     format!("{}-{millis}", std::process::id())
 }
 

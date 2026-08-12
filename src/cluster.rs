@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::ResolvedBinaries;
 use crate::diagnostics::{Item, Level, Report};
+use crate::domain::is_ascii_identifier;
 use crate::mpi_util::advertised_mpi_types;
 use crate::process_probe;
 use crate::runtime_plan::RuntimePlan;
@@ -20,7 +21,7 @@ use crate::spec::{
 use crate::time_util::unix_timestamp_now;
 
 /// Relative location of the generated cluster profile.
-pub const CLUSTER_PROFILE_RELATIVE_PATH: &str = ".hpc-compose/cluster.toml";
+pub(crate) const CLUSTER_PROFILE_RELATIVE_PATH: &str = ".hpc-compose/cluster.toml";
 
 const CLUSTER_PROFILE_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_RDZV_PORT_BASE: u16 = 29_500;
@@ -152,6 +153,16 @@ pub struct DistributedProfile {
     pub env: BTreeMap<String, String>,
 }
 
+impl DistributedProfile {
+    pub(crate) fn effective_rdzv_port_base(&self) -> u16 {
+        self.rdzv_port_base.unwrap_or(DEFAULT_RDZV_PORT_BASE)
+    }
+
+    pub(crate) fn effective_rdzv_port_span(&self) -> u16 {
+        self.rdzv_port_span.unwrap_or(DEFAULT_RDZV_PORT_SPAN)
+    }
+}
+
 /// Human-maintained site metadata for support-team distributed profiles.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
@@ -277,7 +288,7 @@ pub struct ClusterValidationWarning {
 /// Result of generating a cluster profile.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
-pub struct ClusterReportGeneration {
+pub(crate) struct ClusterReportGeneration {
     pub profile: ClusterProfile,
     pub diagnostics: Report,
 }
@@ -497,7 +508,7 @@ impl ClusterProfile {
 
 /// Generates a best-effort cluster profile from local Slurm/runtime tools.
 #[must_use]
-pub fn generate_cluster_profile(binaries: &ResolvedBinaries) -> ClusterReportGeneration {
+pub(crate) fn generate_cluster_profile(binaries: &ResolvedBinaries) -> ClusterReportGeneration {
     let mut diagnostics = Report { items: Vec::new() };
     let slurm_version = run_capture(&binaries.sbatch.value, &["--version"], &mut diagnostics)
         .or_else(|| run_capture(&binaries.srun.value, &["--version"], &mut diagnostics))
@@ -544,13 +555,13 @@ pub fn generate_cluster_profile(binaries: &ResolvedBinaries) -> ClusterReportGen
 
 /// Resolves the default profile path relative to the current repository or cwd.
 #[must_use]
-pub fn default_cluster_profile_path(start: &Path) -> PathBuf {
+pub(crate) fn default_cluster_profile_path(start: &Path) -> PathBuf {
     crate::path_util::repo_root_or_cwd(start).join(CLUSTER_PROFILE_RELATIVE_PATH)
 }
 
 /// Discovers `.hpc-compose/cluster.toml` by searching upward from `start`.
 #[must_use]
-pub fn discover_cluster_profile_path(start: &Path) -> Option<PathBuf> {
+pub(crate) fn discover_cluster_profile_path(start: &Path) -> Option<PathBuf> {
     for dir in start.ancestors() {
         let candidate = dir.join(CLUSTER_PROFILE_RELATIVE_PATH);
         if candidate.is_file() {
@@ -569,7 +580,7 @@ pub(crate) fn load_discovered_cluster_profile(start: &Path) -> Result<Option<Clu
 }
 
 /// Loads a cluster profile from disk.
-pub fn load_cluster_profile(path: &Path) -> Result<ClusterProfile> {
+pub(crate) fn load_cluster_profile(path: &Path) -> Result<ClusterProfile> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read cluster profile {}", path.display()))?;
     let profile: ClusterProfile = toml::from_str(&raw)
@@ -586,7 +597,7 @@ pub fn load_cluster_profile(path: &Path) -> Result<ClusterProfile> {
 }
 
 /// Writes a cluster profile to disk, creating parent directories.
-pub fn write_cluster_profile(path: &Path, profile: &ClusterProfile) -> Result<()> {
+pub(crate) fn write_cluster_profile(path: &Path, profile: &ClusterProfile) -> Result<()> {
     if profile.schema_version != CLUSTER_PROFILE_SCHEMA_VERSION {
         bail!(
             "refusing to write cluster profile with unsupported schema version {}",
@@ -619,8 +630,8 @@ fn validate_distributed_profile(distributed: &DistributedProfile) -> Result<()> 
     if distributed.rdzv_port_span == Some(0) {
         bail!("cluster profile distributed.rdzv_port_span must be greater than zero");
     }
-    let base = distributed.rdzv_port_base.unwrap_or(DEFAULT_RDZV_PORT_BASE);
-    let span = distributed.rdzv_port_span.unwrap_or(DEFAULT_RDZV_PORT_SPAN);
+    let base = distributed.effective_rdzv_port_base();
+    let span = distributed.effective_rdzv_port_span();
     let end = u32::from(base) + u32::from(span) - 1;
     if end > u32::from(u16::MAX) {
         bail!(
@@ -642,14 +653,10 @@ fn validate_distributed_profile(distributed: &DistributedProfile) -> Result<()> 
 }
 
 fn validate_cluster_env_name(name: &str) -> Result<()> {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
+    if name.is_empty() {
         bail!("cluster profile distributed.env contains an empty environment variable name");
-    };
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        bail!("cluster profile distributed.env.{name} is not a safe environment variable name");
     }
-    if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+    if !is_ascii_identifier(name) {
         bail!("cluster profile distributed.env.{name} is not a safe environment variable name");
     }
     if name.starts_with("HPC_COMPOSE_") {
@@ -1156,7 +1163,7 @@ fn compatible_mpi_types_for_implementation(
 
 /// Returns whether an `srun --mpi` token is a preferred match for an MPI profile.
 #[must_use]
-pub fn mpi_type_compatible_with_profile(profile: MpiProfile, mpi_type: &str) -> bool {
+pub(crate) fn mpi_type_compatible_with_profile(profile: MpiProfile, mpi_type: &str) -> bool {
     match profile {
         MpiProfile::Openmpi => mpi_type == "pmi2" || mpi_type.starts_with("pmix"),
         MpiProfile::Mpich => mpi_type == "pmi2" || mpi_type.starts_with("pmix"),
@@ -1573,6 +1580,37 @@ mod tests {
 
     #[test]
     fn cluster_profile_validates_distributed_env_and_ports() {
+        let absent = DistributedProfile::default();
+        validate_distributed_profile(&absent).expect("absent distributed profile");
+        assert_eq!(absent.effective_rdzv_port_base(), 29_500);
+        assert_eq!(absent.effective_rdzv_port_span(), 1_000);
+
+        let fixed = DistributedProfile {
+            rdzv_port: Some(31_337),
+            ..DistributedProfile::default()
+        };
+        validate_distributed_profile(&fixed).expect("fixed distributed rendezvous port");
+        assert_eq!(fixed.effective_rdzv_port_base(), 29_500);
+        assert_eq!(fixed.effective_rdzv_port_span(), 1_000);
+
+        let partial_base = DistributedProfile {
+            rdzv_port_base: Some(31_000),
+            ..DistributedProfile::default()
+        };
+        validate_distributed_profile(&partial_base)
+            .expect("custom base with the default rendezvous span");
+        assert_eq!(partial_base.effective_rdzv_port_base(), 31_000);
+        assert_eq!(partial_base.effective_rdzv_port_span(), 1_000);
+
+        let partial_span = DistributedProfile {
+            rdzv_port_span: Some(17),
+            ..DistributedProfile::default()
+        };
+        validate_distributed_profile(&partial_span)
+            .expect("default base with a custom rendezvous span");
+        assert_eq!(partial_span.effective_rdzv_port_base(), 29_500);
+        assert_eq!(partial_span.effective_rdzv_port_span(), 17);
+
         let valid: ClusterProfile = toml::from_str(
             r#"
 [distributed]
@@ -1586,6 +1624,8 @@ UCX_TLS = "rc,cuda_copy,cuda_ipc"
         )
         .expect("valid profile");
         validate_cluster_profile(&valid).expect("valid distributed profile");
+        assert_eq!(valid.distributed.effective_rdzv_port_base(), 31_000);
+        assert_eq!(valid.distributed.effective_rdzv_port_span(), 100);
 
         let invalid_name: ClusterProfile = toml::from_str(
             r#"
@@ -1606,7 +1646,10 @@ rdzv_port_span = 20
         )
         .expect("invalid port profile parses");
         let err = validate_cluster_profile(&invalid_port).expect_err("port range");
-        assert!(err.to_string().contains("exceeds"));
+        assert_eq!(
+            err.to_string(),
+            "cluster profile distributed rendezvous port range 65530..=65549 exceeds 65535"
+        );
 
         let invalid_default_span: ClusterProfile = toml::from_str(
             r#"
@@ -1616,7 +1659,10 @@ rdzv_port_base = 65000
         )
         .expect("invalid default span profile parses");
         let err = validate_cluster_profile(&invalid_default_span).expect_err("default span range");
-        assert!(err.to_string().contains("exceeds"));
+        assert_eq!(
+            err.to_string(),
+            "cluster profile distributed rendezvous port range 65000..=65999 exceeds 65535"
+        );
 
         let invalid_default_base: ClusterProfile = toml::from_str(
             r#"
@@ -1626,7 +1672,47 @@ rdzv_port_span = 40000
         )
         .expect("invalid default base profile parses");
         let err = validate_cluster_profile(&invalid_default_base).expect_err("default base range");
-        assert!(err.to_string().contains("exceeds"));
+        assert_eq!(
+            err.to_string(),
+            "cluster profile distributed rendezvous port range 29500..=69499 exceeds 65535"
+        );
+    }
+
+    #[test]
+    fn ascii_identifier_policy_preserves_cluster_env_diagnostics_and_reserved_prefix() {
+        for &(name, expected_valid) in crate::domain::ASCII_IDENTIFIER_NAME_CASES {
+            let result = validate_cluster_env_name(name);
+            if expected_valid {
+                result.unwrap_or_else(|error| panic!("name {name:?} should be valid: {error}"));
+            } else {
+                let expected = if name.is_empty() {
+                    "cluster profile distributed.env contains an empty environment variable name"
+                        .to_string()
+                } else {
+                    format!(
+                        "cluster profile distributed.env.{name} is not a safe environment variable name"
+                    )
+                };
+                assert_eq!(
+                    result.expect_err("invalid cluster env name").to_string(),
+                    expected,
+                    "name {name:?}"
+                );
+            }
+        }
+
+        assert_eq!(
+            validate_cluster_env_name("HPC_COMPOSE_DIST_MASTER_ADDR")
+                .expect_err("reserved cluster env prefix")
+                .to_string(),
+            "cluster profile distributed.env.HPC_COMPOSE_DIST_MASTER_ADDR uses the reserved HPC_COMPOSE_ prefix"
+        );
+        assert_eq!(
+            validate_cluster_env_name("HPC_COMPOSE_BAD-NAME")
+                .expect_err("invalid name precedes reserved-prefix check")
+                .to_string(),
+            "cluster profile distributed.env.HPC_COMPOSE_BAD-NAME is not a safe environment variable name"
+        );
     }
 
     #[test]

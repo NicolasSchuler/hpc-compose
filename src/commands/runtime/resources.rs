@@ -3,6 +3,7 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 use hpc_compose::context::ResolvedContext;
+use hpc_compose::domain::is_ascii_identifier;
 use hpc_compose::planner::{PlanOptions, build_plan_with_options};
 use hpc_compose::runtime_plan::{RuntimePlan, build_runtime_plan};
 use hpc_compose::spec::{
@@ -41,14 +42,10 @@ pub(super) fn parse_env_entries(entries: &[String]) -> Result<BTreeMap<String, S
 }
 
 fn validate_cli_env_name(name: &str) -> Result<()> {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
+    if name.is_empty() {
         bail!("--env contains an empty environment variable name");
-    };
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        bail!("--env {name}=... is not a safe environment variable name");
     }
-    if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+    if !is_ascii_identifier(name) {
         bail!("--env {name}=... is not a safe environment variable name");
     }
     Ok(())
@@ -302,6 +299,27 @@ mod tests {
                 .to_string()
                 .contains("must not contain null bytes")
         );
+    }
+
+    #[test]
+    fn ascii_identifier_policy_preserves_cli_env_diagnostics() {
+        for &(name, expected_valid) in crate::domain::ASCII_IDENTIFIER_NAME_CASES {
+            let result = validate_cli_env_name(name);
+            if expected_valid {
+                result.unwrap_or_else(|error| panic!("name {name:?} should be valid: {error}"));
+            } else {
+                let expected = if name.is_empty() {
+                    "--env contains an empty environment variable name".to_string()
+                } else {
+                    format!("--env {name}=... is not a safe environment variable name")
+                };
+                assert_eq!(
+                    result.expect_err("invalid CLI env name").to_string(),
+                    expected,
+                    "name {name:?}"
+                );
+            }
+        }
     }
 
     #[test]

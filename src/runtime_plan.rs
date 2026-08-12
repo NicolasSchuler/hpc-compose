@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::domain::{artifact_cache_key, short_digest_prefix};
+use crate::domain::{artifact_cache_key, artifact_filename_token, short_digest_prefix};
 use crate::planner::{
     ExecutionSpec, ImageSource, Plan, PlannedService, PreparedImageSpec, ServicePlacement,
 };
@@ -136,7 +136,7 @@ fn base_image_path_from_source_for_backend(
     cache_dir.join("base").join(format!(
         "{}-{}.{}",
         short_digest_prefix(&key),
-        sanitize_name(&image_label(source)),
+        artifact_filename_token(&image_label(source)),
         extension
     ))
 }
@@ -164,7 +164,7 @@ fn runtime_image_path(
                 plan.runtime.backend,
                 local_image_fingerprint,
             )),
-            sanitize_name(&service.name),
+            artifact_filename_token(&service.name),
             extension
         )),
     }
@@ -293,19 +293,6 @@ fn image_artifact_extension(source: &ImageSource, backend: RuntimeBackend) -> &'
     }
 }
 
-fn sanitize_name(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 pub(crate) fn image_label(source: &ImageSource) -> String {
     match source {
         ImageSource::LocalSqsh(path) | ImageSource::LocalSif(path) => path
@@ -402,6 +389,36 @@ mod tests {
         ] {
             service.slurm.scratch = scratch;
             assert_eq!(service_allows_configured_scratch(&service), expected);
+        }
+    }
+
+    #[test]
+    fn prepared_runtime_paths_preserve_exact_artifact_filename_tokens() {
+        let cache_dir = PathBuf::from("/shared/cache");
+        for &(service_name, expected_token) in crate::domain::ARTIFACT_FILENAME_TOKEN_CASES {
+            let plan = plan(
+                cache_dir.clone(),
+                vec![planned_service(
+                    service_name,
+                    ImageSource::Remote("docker://redis:7".into()),
+                    Some(prepared_spec()),
+                )],
+            );
+            let service = &plan.ordered_services[0];
+            let key = prepared_image_cache_key_from_plan(
+                service,
+                service.prepare.as_ref().expect("prepare"),
+                plan.runtime.backend,
+            );
+
+            assert_eq!(
+                build_runtime_plan(&plan).ordered_services[0].runtime_image,
+                cache_dir.join("prepared").join(format!(
+                    "{}-{expected_token}.sqsh",
+                    short_digest_prefix(&key)
+                )),
+                "service name {service_name:?}"
+            );
         }
     }
 

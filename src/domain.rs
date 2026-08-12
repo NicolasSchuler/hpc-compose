@@ -96,6 +96,32 @@ pub(crate) fn short_digest_prefix(hash: &str) -> &str {
     &hash[..16]
 }
 
+pub(crate) fn artifact_filename_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn ascii_identifier_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+pub(crate) fn ascii_identifier_continue(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+pub(crate) fn is_ascii_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars.next().is_some_and(ascii_identifier_start) && chars.all(ascii_identifier_continue)
+}
+
 pub(crate) fn extract_human_sbatch_job_id(text: &str) -> Option<&str> {
     const MARKER: &str = "Submitted batch job ";
     let rest = &text[text.find(MARKER)? + MARKER.len()..];
@@ -208,6 +234,39 @@ pub(crate) fn rendezvous_env_token_collision<'a>(
 }
 
 #[cfg(test)]
+pub(crate) const ARTIFACT_FILENAME_TOKEN_CASES: &[(&str, &str)] = &[
+    ("", ""),
+    ("safe-AZ_09", "safe-AZ_09"),
+    ("svc/name", "svc_name"),
+    ("svc.name", "svc_name"),
+    ("svc name\tpart", "svc_name_part"),
+    ("svc///name...end", "svc___name___end"),
+    ("café🙂", "caf__"),
+    (
+        "long-name_0123456789-long-name_0123456789-long-name_0123456789-long-name_0123456789/terminal",
+        "long-name_0123456789-long-name_0123456789-long-name_0123456789-long-name_0123456789_terminal",
+    ),
+];
+
+#[cfg(test)]
+pub(crate) const ASCII_IDENTIFIER_NAME_CASES: &[(&str, bool)] = &[
+    ("", false),
+    ("_", true),
+    ("A", true),
+    ("z", true),
+    ("_A0", true),
+    ("A_Z9", true),
+    ("0A", false),
+    ("A-B", false),
+    ("A.B", false),
+    ("A B", false),
+    ("A\tB", false),
+    ("é", false),
+    ("Aé", false),
+    ("🙂", false),
+];
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -289,6 +348,33 @@ mod tests {
             artifact_cache_key(&["a", "bc"])
         );
         assert_eq!(short_digest_prefix(&artifact_cache_key(&["x"])).len(), 16);
+    }
+
+    #[test]
+    fn artifact_filename_token_preserves_exact_character_mapping() {
+        for &(input, expected) in ARTIFACT_FILENAME_TOKEN_CASES {
+            assert_eq!(artifact_filename_token(input), expected, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn ascii_identifier_predicates_preserve_exact_grammar() {
+        for &(input, expected) in ASCII_IDENTIFIER_NAME_CASES {
+            assert_eq!(is_ascii_identifier(input), expected, "input {input:?}");
+        }
+
+        for ch in ['_', 'A', 'z'] {
+            assert!(ascii_identifier_start(ch), "start {ch:?}");
+            assert!(ascii_identifier_continue(ch), "continue {ch:?}");
+        }
+        for ch in ['0', '9'] {
+            assert!(!ascii_identifier_start(ch), "start {ch:?}");
+            assert!(ascii_identifier_continue(ch), "continue {ch:?}");
+        }
+        for ch in ['-', '.', 'é', '🙂'] {
+            assert!(!ascii_identifier_start(ch), "start {ch:?}");
+            assert!(!ascii_identifier_continue(ch), "continue {ch:?}");
+        }
     }
 
     #[test]

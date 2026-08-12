@@ -5,6 +5,8 @@ use anyhow::{Context, Result, bail};
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
+use crate::domain::is_ascii_identifier;
+
 /// Embedded hyperparameter sweep metadata.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
@@ -191,14 +193,10 @@ impl SweepConfig {
 }
 
 fn validate_sweep_parameter_name(name: &str) -> Result<()> {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
+    if name.is_empty() {
         bail!("sweep parameter names must not be empty");
-    };
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        bail!("sweep parameter '{name}' is not a valid interpolation variable name");
     }
-    if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+    if !is_ascii_identifier(name) {
         bail!("sweep parameter '{name}' is not a valid interpolation variable name");
     }
     if name.starts_with("HPC_COMPOSE_SWEEP_") {
@@ -349,5 +347,44 @@ impl<'de> Deserialize<'de> for SweepMatrix {
         }
 
         deserializer.deserialize_any(MatrixVisitor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ascii_identifier_policy_preserves_sweep_diagnostics_and_reserved_prefix() {
+        for &(name, expected_valid) in crate::domain::ASCII_IDENTIFIER_NAME_CASES {
+            let result = validate_sweep_parameter_name(name);
+            if expected_valid {
+                result.unwrap_or_else(|error| panic!("name {name:?} should be valid: {error}"));
+            } else {
+                let expected = if name.is_empty() {
+                    "sweep parameter names must not be empty".to_string()
+                } else {
+                    format!("sweep parameter '{name}' is not a valid interpolation variable name")
+                };
+                assert_eq!(
+                    result.expect_err("invalid sweep parameter").to_string(),
+                    expected,
+                    "name {name:?}"
+                );
+            }
+        }
+
+        assert_eq!(
+            validate_sweep_parameter_name("HPC_COMPOSE_SWEEP_ID")
+                .expect_err("reserved sweep prefix")
+                .to_string(),
+            "sweep parameter 'HPC_COMPOSE_SWEEP_ID' uses the reserved HPC_COMPOSE_SWEEP_ prefix"
+        );
+        assert_eq!(
+            validate_sweep_parameter_name("HPC_COMPOSE_SWEEP_BAD-NAME")
+                .expect_err("invalid name precedes reserved-prefix check")
+                .to_string(),
+            "sweep parameter 'HPC_COMPOSE_SWEEP_BAD-NAME' is not a valid interpolation variable name"
+        );
     }
 }

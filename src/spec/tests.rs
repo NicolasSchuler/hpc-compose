@@ -1005,6 +1005,28 @@ services:
 }
 
 #[test]
+fn ascii_identifier_policy_preserves_spec_environment_diagnostics() {
+    let field = "service 'app' environment";
+    for &(name, expected_valid) in crate::domain::ASCII_IDENTIFIER_NAME_CASES {
+        let result = validate_safe_env_name(name, field);
+        if expected_valid {
+            result.unwrap_or_else(|error| panic!("name {name:?} should be valid: {error}"));
+        } else {
+            let expected = if name.is_empty() {
+                format!("{field} contains an empty environment variable name")
+            } else {
+                format!("{field}.{name} is not a safe environment variable name")
+            };
+            assert_eq!(
+                result.expect_err("invalid environment name").to_string(),
+                expected,
+                "name {name:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn prepare_environment_rejects_unsafe_variable_names() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let path = write_spec(

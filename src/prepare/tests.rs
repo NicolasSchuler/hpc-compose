@@ -1594,7 +1594,10 @@ fn helper_defaults_and_paths_cover_remaining_prepare_helpers() {
         crate::domain::short_digest_prefix("1234567890abcdef1234"),
         "1234567890abcdef"
     );
-    assert_eq!(sanitize_name("svc/name"), "svc_name");
+    assert_eq!(
+        crate::domain::artifact_filename_token("svc/name"),
+        "svc_name"
+    );
     assert_eq!(image_label(&service.source), "local-image");
     let temp = cache_dir.join("enroot/tmp");
     let data = cache_dir.join("enroot/data");
@@ -1617,6 +1620,103 @@ fn helper_defaults_and_paths_cover_remaining_prepare_helpers() {
             .iter()
             .any(|(key, value)| key == "NVIDIA_VISIBLE_DEVICES" && value == "void")
     );
+}
+
+#[test]
+fn temporary_rootfs_names_preserve_exact_artifact_filename_token_prefixes() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let mut service = fake_service(tmpdir.path());
+
+    for &(service_name, expected_token) in crate::domain::ARTIFACT_FILENAME_TOKEN_CASES {
+        service.name = service_name.to_string();
+        let rootfs_name = temporary_rootfs_name(&service);
+        let dynamic_name = rootfs_name
+            .strip_prefix("hpc-compose-")
+            .expect("rootfs prefix");
+        let mut components = dynamic_name.rsplitn(4, '-');
+        let sequence = components.next().expect("sequence");
+        let nanos = components.next().expect("nanoseconds");
+        let pid = components.next().expect("pid");
+        let actual_token = components.next().expect("artifact filename token");
+
+        assert_eq!(
+            actual_token, expected_token,
+            "service name {service_name:?}"
+        );
+        for (label, value) in [("pid", pid), ("nanoseconds", nanos), ("sequence", sequence)] {
+            assert!(
+                !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
+                "{label} component should be numeric in {rootfs_name:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn consecutive_temporary_rootfs_names_are_unique_with_the_same_structure() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let service = fake_service(tmpdir.path());
+    let prefix = format!(
+        "hpc-compose-{}-{}-",
+        crate::domain::artifact_filename_token(&service.name),
+        std::process::id()
+    );
+
+    let first = temporary_rootfs_name(&service);
+    let second = temporary_rootfs_name(&service);
+
+    assert_ne!(first, second, "consecutive rootfs names must not collide");
+    for name in [&first, &second] {
+        let dynamic = name.strip_prefix(&prefix).expect("stable rootfs prefix");
+        let (nanos, sequence) = dynamic
+            .split_once('-')
+            .expect("nanoseconds and sequence components");
+        for (label, value) in [("nanoseconds", nanos), ("sequence", sequence)] {
+            assert!(
+                !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
+                "{label} component should be numeric in {name:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn consecutive_artifact_staging_paths_are_unique_and_retain_image_extensions() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+
+    for extension in ["sqsh", "sif"] {
+        let target = tmpdir.path().join(format!("runtime.{extension}"));
+        let first = temporary_artifact_staging_path(&target);
+        let second = temporary_artifact_staging_path(&target);
+        let prefix = format!(".runtime.hpc-compose-stage-{}-", std::process::id());
+        let suffix = format!(".{extension}");
+
+        assert_ne!(first, second, "consecutive staging paths must not collide");
+        for path in [&first, &second] {
+            assert_eq!(path.parent(), target.parent());
+            assert_eq!(
+                path.extension().and_then(|value| value.to_str()),
+                Some(extension)
+            );
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .expect("UTF-8 staging filename");
+            let dynamic = file_name
+                .strip_prefix(&prefix)
+                .and_then(|value| value.strip_suffix(&suffix))
+                .expect("stable staging filename structure");
+            let (nanos, sequence) = dynamic
+                .split_once('-')
+                .expect("nanoseconds and sequence components");
+            for (label, value) in [("nanoseconds", nanos), ("sequence", sequence)] {
+                assert!(
+                    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
+                    "{label} component should be numeric in {file_name:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

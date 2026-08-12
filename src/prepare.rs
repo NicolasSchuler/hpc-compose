@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -13,9 +12,11 @@ use crate::cache::{
     CacheEntryKind, acquire_image_artifact_build_lock, image_artifact_is_committed, touch_manifest,
     upsert_base_manifest, upsert_prepared_manifest,
 };
+use crate::domain::artifact_filename_token;
 use crate::planner::{ImageSource, PreparedImageSpec};
 use crate::runtime_plan::{base_image_cache_key, prepared_image_cache_key};
 use crate::spec::RuntimeBackend;
+use crate::time_util::unix_timestamp_nanos;
 
 mod stream;
 
@@ -85,7 +86,7 @@ fn prepare_gpu_enabled() -> bool {
 
 /// Pure truthiness parse for [`PREPARE_GPU_ENV`], split out so the
 /// accepted-values contract can be unit-tested without touching process env.
-pub(crate) fn gpu_flag_enabled(value: Option<&str>) -> bool {
+fn gpu_flag_enabled(value: Option<&str>) -> bool {
     parse_truthy_flag(value)
 }
 
@@ -990,14 +991,11 @@ fn temporary_rootfs_name(service: &RuntimeService) -> String {
     // sub-second nanos, and a per-process counter. The name is transient, so
     // widening it has no downstream cost.
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let nanos = unix_timestamp_nanos();
     let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     format!(
         "hpc-compose-{}-{}-{}-{}",
-        sanitize_name(&service.name),
+        artifact_filename_token(&service.name),
         std::process::id(),
         nanos,
         seq
@@ -1008,19 +1006,6 @@ fn temporary_sandbox_path(cache_dir: &Path, service: &RuntimeService) -> PathBuf
     cache_dir
         .join("prepared")
         .join(format!("{}.sandbox", temporary_rootfs_name(service)))
-}
-
-fn sanitize_name(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 fn create_cache_dirs(plan: &RuntimePlan) -> Result<()> {
@@ -1100,10 +1085,7 @@ fn build_and_publish_artifact(
 /// some image tools infer their output format from `.sqsh`/`.sif`.
 fn temporary_artifact_staging_path(target: &Path) -> PathBuf {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let nanos = unix_timestamp_nanos();
     let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let stem = target
         .file_stem()

@@ -14,7 +14,7 @@ use crate::diagnostics::{
     CONTEXTUAL_METRICS_COLLECTOR_PREFIX, CONTEXTUAL_PYXIS_HELPER_PREFIX,
     CONTEXTUAL_TASK_PROLOG_PREFIX,
 };
-use crate::domain::registry_host_for_remote;
+use crate::domain::{MountParts, registry_host_for_remote, split_mount_parts};
 use crate::mpi_util::{advertised_mpi_types, preferred_mpi_type_description};
 use crate::path_util::{cache_path_policy_issue, runtime_root_policy_issue};
 use crate::planner::{ExecutionSpec, ImageSource};
@@ -30,12 +30,12 @@ use self::shared_fs_probe::{
 /// Shared findings model, re-exported so existing `preflight::*` report paths
 /// keep working after ownership moved to [`crate::diagnostics`].
 #[allow(unused_imports)]
-pub use crate::diagnostics::{GroupedReport, Item, Level, Report, ReportSummary};
+pub(crate) use crate::diagnostics::{GroupedReport, Item, Level, Report, ReportSummary};
 
 /// Options controlling which tools and checks preflight should require.
 #[allow(missing_docs)]
 #[derive(Debug, Clone)]
-pub struct Options {
+pub(crate) struct Options {
     pub enroot_bin: String,
     pub apptainer_bin: String,
     pub singularity_bin: String,
@@ -72,7 +72,7 @@ impl Default for Options {
 const LOW_SPACE_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 
 /// Runs all login-node preflight checks for a prepared runtime plan.
-pub fn run(plan: &RuntimePlan, options: &Options) -> Report {
+pub(crate) fn run(plan: &RuntimePlan, options: &Options) -> Report {
     let mut report = Report { items: Vec::new() };
 
     check_runtime_backend(&mut report, plan, options);
@@ -231,8 +231,8 @@ fn check_distributed_profile_context(
     } else if profile.distributed.rdzv_port_base.is_some()
         || profile.distributed.rdzv_port_span.is_some()
     {
-        let base = profile.distributed.rdzv_port_base.unwrap_or(29_500);
-        let span = profile.distributed.rdzv_port_span.unwrap_or(1_000);
+        let base = profile.distributed.effective_rdzv_port_base();
+        let span = profile.distributed.effective_rdzv_port_span();
         report.items.push(Item {
             level: Level::Ok,
             message: format!(
@@ -1418,7 +1418,12 @@ fn check_registry_credentials(report: &mut Report, plan: &RuntimePlan) {
 }
 
 fn host_path_from_mount(mount: &str) -> &str {
-    mount.split_once(':').map(|(host, _)| host).unwrap_or(mount)
+    match split_mount_parts(mount) {
+        MountParts::HostContainer { host, .. } => host,
+        MountParts::UnsupportedMode(_) | MountParts::InvalidShape => {
+            mount.split_once(':').map_or(mount, |(host, _)| host)
+        }
+    }
 }
 
 fn find_binary(binary: &str) -> Option<PathBuf> {
@@ -1643,6 +1648,19 @@ mod tests {
         assert!(profile_mpi_type_remediation(MpiProfile::Openmpi).contains("pmix"));
         assert!(profile_mpi_type_remediation(MpiProfile::Mpich).contains("pmi2"));
         assert!(profile_mpi_type_remediation(MpiProfile::IntelMpi).contains("I_MPI_PMI_LIBRARY"));
+    }
+
+    #[test]
+    fn mount_host_path_preserves_legacy_shape_handling() {
+        for (mount, expected) in [
+            ("/host/bare", "/host/bare"),
+            ("/host/readonly:/container:ro", "/host/readonly"),
+            ("/host/readwrite:/container:rw", "/host/readwrite"),
+            ("/host/unsupported:/container:rx", "/host/unsupported"),
+            ("/host/extra:/container:ro:extra", "/host/extra"),
+        ] {
+            assert_eq!(host_path_from_mount(mount), expected, "mount {mount:?}");
+        }
     }
 
     #[test]
@@ -2010,6 +2028,71 @@ mod tests {
                 .iter()
                 .any(|item| { item.level == Level::Warn && item.message.contains("cache_dir") })
         );
+    }
+
+    #[test]
+    fn distributed_profile_context_preserves_effective_rendezvous_diagnostics() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let mut plan = runtime_plan(tmpdir.path());
+        plan.slurm.nodes = Some(2);
+        plan.ordered_services[0].placement.nodes = 2;
+        plan.ordered_services[0].placement.mode = ServicePlacementMode::Distributed;
+
+        let cases = [
+            (crate::cluster::DistributedProfile::default(), None),
+            (
+                crate::cluster::DistributedProfile {
+                    rdzv_port: Some(31_337),
+                    ..Default::default()
+                },
+                Some("cluster profile distributed rendezvous port is fixed at 31337"),
+            ),
+            (
+                crate::cluster::DistributedProfile {
+                    rdzv_port_base: Some(31_000),
+                    ..Default::default()
+                },
+                Some(
+                    "cluster profile distributed rendezvous ports derive from range 31000..=31999",
+                ),
+            ),
+            (
+                crate::cluster::DistributedProfile {
+                    rdzv_port_span: Some(17),
+                    ..Default::default()
+                },
+                Some(
+                    "cluster profile distributed rendezvous ports derive from range 29500..=29516",
+                ),
+            ),
+            (
+                crate::cluster::DistributedProfile {
+                    rdzv_port_base: Some(32_000),
+                    rdzv_port_span: Some(23),
+                    ..Default::default()
+                },
+                Some(
+                    "cluster profile distributed rendezvous ports derive from range 32000..=32022",
+                ),
+            ),
+        ];
+
+        for (distributed, expected) in cases {
+            let profile = ClusterProfile {
+                distributed,
+                ..ClusterProfile::default()
+            };
+            let mut report = Report { items: Vec::new() };
+            check_distributed_profile_context(&mut report, &plan, &profile);
+            assert_eq!(
+                report
+                    .items
+                    .iter()
+                    .map(|item| item.message.as_str())
+                    .collect::<Vec<_>>(),
+                expected.into_iter().collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
