@@ -16,3 +16,8 @@ BEEOND = "BEEOND"
 # Domain vocabulary that looks like a typo but is correct (e.g. HPE MPI).
 Hashi = "Hashi"
 hpe = "hpe"
+# Author names retained from primary bibliographic metadata.
+Groth = "Groth"
+Ned = "Ned"
+Ove = "Ove"
+Sebastiaan = "Sebastiaan"

@@ -1,7 +1,7 @@
 # Product Backlog
 
-- **Last reviewed:** 2026-07-09
-- **Current release baseline:** hpc-compose v0.2.0
+- **Last reviewed:** 2026-08-09
+- **Current release baseline:** hpc-compose v0.2.3
 - **Source of truth:** this file; the manual publishes it through an include
 - **Scope:** product candidates and explicit decisions beyond the short strategic roadmap
 
@@ -33,6 +33,7 @@ Clap path, tests, manpage, and user docs must agree.
 | RW-08 | Emit a self-contained HTML sweep report. | `candidate` | [`sweep results` and scaling reports](https://nicolasschuler.github.io/hpc-compose/sweeps.html#scaling-reports) | Choose a dependency and accessibility strategy plus a deterministic fixture-based renderer. |
 | RW-09 | Record content-addressed provenance for staged datasets and models. | `candidate` | [`stage_in` and cache inventory](https://nicolasschuler.github.io/hpc-compose/spec-reference.html) | Define digest acquisition for local and remote sources without forcing network access during static planning. |
 | RW-10 | Generalize sweep early termination to ASHA-style rung pruning. | `candidate` | [`sweep observe --stop-when`](https://nicolasschuler.github.io/hpc-compose/sweeps.html#objectives-and-early-termination) | Specify intermediate-objective durability, cancellation authorization, and reproducible pruning semantics. |
+| RW-11 | Export a tracked run in a Workflow Run RO-Crate-compatible research-object shape. | `candidate` | [Workflow Run RO-Crate profile](https://www.researchobject.org/workflow-run-crate/profiles/workflow_run_crate/), [current experiment-bundle boundary](https://nicolasschuler.github.io/hpc-compose/runtime-observability.html#experiment-bundles) | Complete a publish-safe export and standards-crosswalk go/no-go decision; define a versioned offline allowlist, redaction and omission states, preserve unavailable/degraded evidence, validate independently, and avoid completeness or reproducibility claims beyond the exported fields. |
 
 ## Cluster Citizenship
 
@@ -63,6 +64,7 @@ Clap path, tests, manpage, and user docs must agree.
 | OP-08 | Probe shared-filesystem visibility and rename behavior from a compute node. | `shipped` | [`preflight --fs-probes` docs](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#plan-and-run), [focused tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_spec.rs), [manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-preflight.1) | Add site evidence without making an allocation-consuming probe implicit. |
 | OP-09 | Reap tracked-state, rendezvous, and orphaned runtime residue in one dry-run-first flow. | `shipped` | [`clean --deep` docs](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#tracked-runtime), [focused tests](https://github.com/NicolasSchuler/hpc-compose/blob/main/tests/cli_runtime.rs), [manpage](https://github.com/NicolasSchuler/hpc-compose/blob/main/man/man1/hpc-compose-clean.1) | Preserve dry-run parity and explicit confirmation for deletion. |
 | OP-10 | Warn when requested walltime is close to historical runtime. | `candidate` | [`stats --accounting`](https://nicolasschuler.github.io/hpc-compose/runtime-observability.html) | Define workload identity, censored-run handling, minimum sample size, and conservative thresholds. |
+| OP-11 | Seal a receipt that binds effective input, normalized plan, exact scheduler-consumed script bytes, compiler context, and accepted scheduler identity. | `candidate` | [render and explain interface](https://nicolasschuler.github.io/hpc-compose/cli-reference.html#plan-and-run), [run-evidence identity model](https://nicolasschuler.github.io/hpc-compose/run-evidence.html#identity-model) | First preserve and verify the exact scheduler-consumed bytes through export; then approve the receipt's canonicalization, versioning, privacy, legacy, verification, and recovery contract before exposing it publicly. |
 
 ## Developer Experience
 
@@ -94,6 +96,10 @@ Clap path, tests, manpage, and user docs must agree.
 
 ## Review Rules
 
+- Use `docs/plans/icpe-2027-open-improvement-ledger.md` for verbose manuscript,
+  literature, evaluation, and artifact work. Promote only genuine public product
+  candidates here, and keep their implementation status independent from paper
+  planning.
 - Reconcile `shipped` rows against Clap, focused tests, generated manpages, and
   user docs at every release baseline change.
 - Prefer a new stable ID when a proposal's authorization boundary or core
