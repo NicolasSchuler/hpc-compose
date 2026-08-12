@@ -1,10 +1,23 @@
-use super::scheduler::{
-    is_transitional_local_only, reconcile_scheduler_status, unix_timestamp_now,
-};
-use super::*;
-use crate::term;
-use crate::time_util::system_time_to_unix;
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::thread;
+
+use anyhow::{Context, Result, bail};
 use regex::Regex;
+
+use crate::term;
+use crate::time_util::{system_time_to_unix, unix_timestamp_now};
+
+use super::POLL_INTERVAL;
+use super::model::{SchedulerSource, SubmissionBackend, SubmissionRecord};
+use super::scheduler::{
+    JobState, QueueDiagnostics, SchedulerStatus, build_status_snapshot, format_walltime_duration,
+    format_walltime_summary, is_transitional_local_only,
+    probe_scheduler_status_with_queue_diagnostics, reconcile_scheduler_status,
+    scheduler_source_label, walltime_progress, walltime_progress_percent,
+};
+use super::stats::SchedulerOptions;
 
 /// Final outcome returned by `watch_submission`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -685,6 +698,9 @@ pub fn parse_queue_warn_after_duration(raw: &str) -> Result<Option<u64>> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::record::{
+        build_submission_record_with_backend, state_path_for_record, write_submission_record,
+    };
     use super::*;
 
     #[test]
@@ -806,6 +822,42 @@ mod tests {
         let tailed = tail_lines(&log, 2).expect("tail large log");
 
         assert_eq!(tailed, vec!["bad-\u{fffd}".to_string(), "last".to_string()]);
+    }
+
+    #[test]
+    fn tail_lines_preserves_shared_edge_matrix() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let log = tmpdir.path().join("edge.log");
+
+        fs::write(&log, []).expect("empty log");
+        assert_eq!(
+            tail_lines(&log, 3).expect("empty tail"),
+            Vec::<String>::new()
+        );
+
+        fs::write(&log, "alpha\nβeta\n終").expect("log without trailing newline");
+        assert_eq!(
+            tail_lines(&log, 4).expect("fewer lines than limit"),
+            vec!["alpha", "βeta", "終"]
+        );
+        assert_eq!(
+            tail_lines(&log, 3).expect("exact line limit"),
+            vec!["alpha", "βeta", "終"]
+        );
+        assert_eq!(
+            tail_lines(&log, 2).expect("more lines than limit"),
+            vec!["βeta", "終"]
+        );
+        assert_eq!(
+            tail_lines(&log, 0).expect("zero limit"),
+            Vec::<String>::new()
+        );
+
+        fs::write(&log, "alpha\nβeta\n終\n").expect("log with trailing newline");
+        assert_eq!(
+            tail_lines(&log, 3).expect("trailing newline"),
+            vec!["alpha", "βeta", "終"]
+        );
     }
 
     #[test]

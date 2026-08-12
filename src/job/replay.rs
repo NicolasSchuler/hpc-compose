@@ -1,7 +1,22 @@
+use std::collections::BTreeMap;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+
+use crate::tracked_paths::{self, SERVICE_EXITS_DIR_NAME};
+
+use super::metadata_io::read_json;
+use super::model::{SchedulerSource, SubmissionRecord};
+use super::ps::PsSnapshot;
+use super::record::{log_dir_for_record, runtime_job_root_for_record};
 use super::runtime_state::{ServiceRuntimeStateEntry, ServiceRuntimeStateFile};
-use super::scheduler::{build_log_status, build_scheduler_status};
-use super::*;
-use crate::tracked_paths::SERVICE_EXITS_DIR_NAME;
+use super::scheduler::{
+    PsServiceRow, SchedulerStatus, build_log_status, build_scheduler_status,
+    parse_scheduler_timestamp,
+};
 
 const REPLAY_FIDELITY: &str = "best-effort";
 
@@ -964,8 +979,9 @@ fn build_frame_snapshot(
                 .cloned()
                 .or_else(|| final_state.and_then(|state| state.log_path.clone()))
                 .unwrap_or_else(|| {
-                    log_dir_for_record(record)
-                        .join(log_file_name_for_service(&service.service_name))
+                    log_dir_for_record(record).join(tracked_paths::log_file_name_for_service(
+                        &service.service_name,
+                    ))
                 });
             let log_status = build_log_status(&path, now);
             PsServiceRow {
@@ -1059,6 +1075,9 @@ fn metrics_line_at(metrics: &[ReplayMetricSample], cursor_unix: u64) -> Option<S
 
 #[cfg(test)]
 mod tests {
+    use super::super::SUBMISSION_SCHEMA_VERSION;
+    use super::super::model::{SubmissionBackend, SubmissionKind};
+    use super::super::record::write_submission_record;
     use super::*;
 
     fn sample_record(root: &Path) -> SubmissionRecord {

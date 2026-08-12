@@ -6,12 +6,25 @@
 //! state.
 
 use std::collections::BTreeSet;
+use std::fs::{self, File};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use flate2::Compression;
+use flate2::write::GzEncoder;
+use serde::{Deserialize, Serialize};
+use tar::Builder;
 
 use super::artifacts::{
+    ArtifactManifest, artifact_manifest_path_for_record, artifact_payload_dir_for_record,
     copy_path_recursive_within, resolve_selected_bundles, validate_manifest_relative_path,
     validate_payload_source,
 };
-use super::*;
+use super::checkpoints::CheckpointHistory;
+use super::file_digest::sha256_file;
+use super::model::SubmissionRecord;
+use super::{ARTIFACT_MANIFEST_SCHEMA_VERSION, absolute_path};
 
 const EXPERIMENT_BUNDLE_SCHEMA_VERSION: u32 = 1;
 
@@ -661,7 +674,7 @@ fn collect_bundle_file_entries_inner(
             continue;
         }
         let (size_bytes, sha256) = if metadata.is_file() {
-            (Some(metadata.len()), Some(hash_bundle_file(&entry_path)?))
+            (Some(metadata.len()), Some(sha256_file(&entry_path)?))
         } else {
             (None, None)
         };
@@ -672,22 +685,6 @@ fn collect_bundle_file_entries_inner(
         });
     }
     Ok(())
-}
-
-fn hash_bundle_file(path: &Path) -> Result<String> {
-    let mut file = File::open(path).context(format!("failed to open {}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .context(format!("failed to read {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex::encode(hasher.finalize()))
 }
 
 fn write_bundle_tarball(tarball_path: &Path, bundle_root: &Path, dir_name: &str) -> Result<()> {
@@ -747,10 +744,23 @@ fn append_dir_contents_to_tar<W: Write>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use sha2::{Digest, Sha256};
+
     use flate2::read::GzDecoder;
     use tar::Archive;
 
+    use super::super::SUBMISSION_SCHEMA_VERSION;
+    use super::super::artifacts::ArtifactBundleManifest;
+    use super::super::model::{SubmissionBackend, SubmissionKind};
+    use super::super::provenance::JobProvenance;
+    use super::super::record::{
+        append_job_note, apply_tag_changes, remove_submission_record, update_submission_record,
+        write_submission_record,
+    };
     use super::*;
+    use crate::job::metadata_io::write_json;
 
     fn record_for(tmpdir: &Path, job_id: &str) -> SubmissionRecord {
         let compose = tmpdir.join("compose.yaml");

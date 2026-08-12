@@ -5,18 +5,20 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::memory::parse_memory_bytes;
 use crate::spec::{
     ComposeSpec, EffectiveComposeConfig, EffectiveWatchdogConfig, EffectiveWatchdogResourceConfig,
-    WatchdogAction, parse_memory_bytes,
+    WatchdogAction,
 };
 
+use super::analytics::{estimated_step_memory_bytes, find_tres_value, parse_f64, parse_u64};
+use super::metadata_io::read_json;
 use super::model::SubmissionRecord;
-use super::read_json;
 use super::scheduler::{JobState, SchedulerStatus, parse_scheduler_timestamp};
 use super::stats::{
     CollectorCoverage, CollectorCoverageSummary, GpuDeviceSampleRow, SamplerMetaFile,
     SlurmSampleRow, StepStats, collector_coverage_summaries, effective_collector_coverage,
-    expected_nodes_for_record, find_tres_value, metrics_dir_for_record, step_from_slurm_sample_row,
+    expected_nodes_for_record, metrics_dir_for_record, step_from_slurm_sample_row,
 };
 
 /// Status of the advisory idle-resource watchdog.
@@ -504,26 +506,11 @@ fn merge_cpu_memory_samples(
 }
 
 fn step_memory_resident_pct(step: &StepStats) -> Option<f64> {
-    let observed = estimated_step_memory_bytes(step)?;
+    let observed = estimated_step_memory_bytes(&step.max_rss, &step.ave_rss, &step.ntasks)?;
     let allocated = find_tres_value(&step.alloc_tres_map, "mem")
         .or_else(|| find_tres_value(&step.alloc_tres_map, "memory"))
         .and_then(|value| parse_memory_bytes(&value))?;
     (allocated > 0).then(|| observed as f64 * 100.0 / allocated as f64)
-}
-
-fn estimated_step_memory_bytes(step: &StepStats) -> Option<u64> {
-    let max_rss = parse_memory_bytes(&step.max_rss);
-    let ave_rss_total = parse_memory_bytes(&step.ave_rss)
-        .map(|value| value.saturating_mul(step.ntasks.trim().parse::<u64>().unwrap_or(1).max(1)));
-    max_option(max_rss, ave_rss_total)
-}
-
-fn max_option(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.max(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
 }
 
 fn classify_resource_window(
@@ -841,14 +828,6 @@ fn overall_message(
     }
 }
 
-fn parse_f64(raw: Option<&str>) -> Option<f64> {
-    raw?.trim().parse::<f64>().ok()
-}
-
-fn parse_u64(raw: Option<&str>) -> Option<u64> {
-    raw?.trim().parse::<u64>().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -934,6 +913,26 @@ mod tests {
             observation.classification,
             WatchdogClassification::InsufficientWindow
         );
+    }
+
+    #[test]
+    fn watchdog_memory_lookup_accepts_typed_tres_keys() {
+        let step = StepStats {
+            step_id: "123.0".into(),
+            ntasks: "1".into(),
+            ave_cpu: String::new(),
+            ave_rss: String::new(),
+            max_rss: "1G".into(),
+            alloc_tres: "mem:node=4G".into(),
+            tres_usage_in_ave: String::new(),
+            alloc_tres_map: BTreeMap::from([("mem:node".into(), "4G".into())]),
+            usage_tres_in_ave_map: BTreeMap::new(),
+            gpu_count: None,
+            gpu_util: None,
+            gpu_mem: None,
+        };
+
+        assert_eq!(step_memory_resident_pct(&step), Some(25.0));
     }
 
     #[test]

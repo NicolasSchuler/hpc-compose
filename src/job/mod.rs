@@ -1,34 +1,35 @@
 //! Tracking, status inspection, log streaming, metrics, and artifact export
 //! for submitted jobs.
 
-use std::collections::BTreeMap;
 use std::env;
-use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
-use flate2::Compression;
-use flate2::write::GzEncoder;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use tar::Builder;
+use anyhow::Result;
 
-use crate::render::log_file_name_for_service;
 use crate::runtime_plan::RuntimePlan;
+
+// The broad fixture suite in `job/tests.rs` intentionally exercises the
+// public facade as a whole. Keep its support imports test-only so production
+// submodules cannot acquire dependencies through the parent namespace.
+#[cfg(test)]
 use crate::tracked_paths;
+#[cfg(test)]
+use std::fs;
 
 mod accounting;
+mod analytics;
+mod annotation_policy;
 mod artifacts;
 mod bundle;
 mod checkpoints;
+mod config_snapshot;
 mod deep_clean;
 mod diff;
 mod evidence;
+mod file_digest;
 mod logs;
+mod metadata_io;
 mod metrics_probe;
 mod model;
 mod provenance;
@@ -48,7 +49,7 @@ mod watchdog;
 #[cfg(test)]
 use artifacts::{copy_path_recursive, remove_existing_destination, resolve_export_dir};
 #[cfg(test)]
-use logs::{read_new_lines, selected_service_logs, tail_lines};
+use logs::{read_new_lines, selected_service_logs};
 #[cfg(test)]
 use stats::{
     load_sampler_snapshot, parse_sstat_output, probe_step_stats, step_from_slurm_sample_row,
@@ -67,6 +68,9 @@ pub use bundle::{
 pub use checkpoints::{
     CheckpointAttempt, CheckpointAttemptService, CheckpointHistory, collect_checkpoint_history,
 };
+// Transitional facade for command call sites moved in the next commit.
+#[allow(unused_imports)]
+pub(crate) use config_snapshot::effective_config_snapshot_yaml;
 pub use deep_clean::{
     DeepCleanupDetails, OrphanRuntimeDirReport, build_deep_cleanup_report, run_deep_cleanup_report,
 };
@@ -75,6 +79,7 @@ pub use diff::{
     JobMatrixRun, SpecDiffReport, build_job_diff_report, build_job_matrix_report,
     build_spec_diff_report,
 };
+pub(crate) use logs::tail_lines;
 pub use logs::{
     LogPrintOptions, WatchOutcome, parse_log_since_duration, parse_queue_warn_after_duration,
     print_logs, wait_for_job_start, watch_submission,
@@ -157,50 +162,6 @@ const ARTIFACT_PROVENANCE_SCHEMA_VERSION: u32 = 2;
 
 fn absolute_path(path: &Path) -> Result<PathBuf> {
     crate::path_util::absolute_path_cwd(path)
-}
-
-fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
-    }
-    let serialized =
-        serde_json::to_vec_pretty(value).context("failed to serialize job metadata")?;
-    // Atomic, owner-only write via a per-writer unique temp file + rename, so
-    // concurrent runs on a shared filesystem never publish (or observe) a torn
-    // record, do not collide on a fixed `*.json.tmp` name, and do not expose
-    // potentially sensitive command/sweep/config metadata to other users.
-    crate::secure_io::write_atomic(path, &serialized, true)
-        .context(format!("failed to write {}", path.display()))
-}
-
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    let raw = fs::read_to_string(path).context(format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&raw).context(format!("failed to parse {}", path.display()))
-}
-
-/// Read an optional JSON file, distinguishing "legitimately absent" from "broken".
-///
-/// A missing file (`NotFound`) is an expected, silent `None`. A corrupt/truncated
-/// file or any other IO error is a *degraded* `None`: we emit a single `WARN` line
-/// naming the path and error so tracked jobs no longer vanish silently, then return
-/// `None` to preserve the caller's fall-through behavior.
-fn read_json_optional<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
-    match read_json::<T>(path) {
-        Ok(value) => Some(value),
-        Err(err) => {
-            let is_not_found = err
-                .chain()
-                .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
-                .any(|io_err| io_err.kind() == std::io::ErrorKind::NotFound);
-            if !is_not_found {
-                crate::diagnostics::warn_with_code(
-                    "corrupt_job_record",
-                    format!("{}: {err:#}", path.display()),
-                );
-            }
-            None
-        }
-    }
 }
 
 fn batch_log_path_for_backend(

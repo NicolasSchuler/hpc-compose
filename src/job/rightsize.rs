@@ -5,10 +5,17 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
+use crate::domain::service_step_name;
+use crate::memory::{GIB, parse_memory_bytes};
 use crate::runtime_plan::{RuntimePlan, RuntimeService};
-use crate::spec::{GIB, parse_memory_bytes, parse_slurm_time_limit};
+use crate::spec::parse_slurm_time_limit;
 
-use super::accounting::{AccountingRow, AccountingSnapshot, build_accounting_snapshot};
+use super::StatsOptions;
+use super::accounting::{
+    AccountingRow, AccountingSnapshot, build_accounting_snapshot, observed_elapsed_seconds,
+};
+use super::analytics::{estimated_step_memory_bytes, format_bytes_gib, gpu_device_key, parse_u64};
+use super::metadata_io::read_json;
 use super::model::{SubmissionBackend, SubmissionRecord};
 use super::runtime_state::{load_runtime_state, runtime_state_by_service};
 use super::scheduler::{build_status_snapshot, scheduler_source_label};
@@ -18,7 +25,6 @@ use super::stats::{
     effective_collector_coverage, metrics_dir_for_record, probe_step_stats,
     step_from_slurm_sample_row,
 };
-use super::{StatsOptions, read_json};
 
 const MEMORY_HEADROOM_PERCENT: f64 = 1.25;
 const MEMORY_ABSOLUTE_HEADROOM_BYTES: u64 = 2 * GIB;
@@ -280,7 +286,9 @@ fn add_memory_rightsize(
     };
 
     let mut observed_candidates = Vec::new();
-    observed_candidates.extend(steps.iter().filter_map(estimated_step_memory_bytes));
+    observed_candidates.extend(steps.iter().filter_map(|step| {
+        estimated_step_memory_bytes(&step.max_rss, &step.ave_rss, &step.ntasks)
+    }));
     if let Some(accounting) = accounting {
         observed_candidates.extend(accounting.rows.iter().filter_map(|row| row.max_rss_bytes));
     }
@@ -631,7 +639,11 @@ fn load_gpu_activity_history(metrics_dir: &Path) -> Result<Option<GpuActivitySum
             gpu_path.display(),
             index + 1
         ))?;
-        let key = gpu_device_key(&row);
+        let key = gpu_device_key(
+            row.uuid.as_deref(),
+            row.node.as_deref(),
+            row.index.as_deref(),
+        );
         let sample = samples.entry(row.sampled_at.clone()).or_default();
         sample.seen_devices.insert(key.clone());
         if gpu_device_is_active(&row) {
@@ -682,20 +694,6 @@ fn load_gpu_activity_history(metrics_dir: &Path) -> Result<Option<GpuActivitySum
     }))
 }
 
-fn gpu_device_key(row: &GpuDeviceSampleRow) -> String {
-    row.uuid
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            format!(
-                "{}:{}",
-                row.node.as_deref().unwrap_or("unknown-node"),
-                row.index.as_deref().unwrap_or("unknown-index")
-            )
-        })
-}
-
 fn process_gpu_key(row: &GpuProcessSampleRow) -> Option<String> {
     row.gpu_uuid
         .as_deref()
@@ -709,13 +707,6 @@ fn gpu_device_is_active(row: &GpuDeviceSampleRow) -> bool {
         .is_some_and(|value| value > GPU_ACTIVE_UTILIZATION_PERCENT)
         || parse_u64(row.memory_used_mib.as_deref())
             .is_some_and(|value| value > GPU_ACTIVE_MEMORY_MIB)
-}
-
-fn estimated_step_memory_bytes(step: &StepStats) -> Option<u64> {
-    let max_rss = parse_memory_bytes(&step.max_rss);
-    let ave_rss_total = parse_memory_bytes(&step.ave_rss)
-        .map(|value| value.saturating_mul(step.ntasks.trim().parse::<u64>().unwrap_or(1).max(1)));
-    max_option(max_rss, ave_rss_total)
 }
 
 fn accounting_rows_for_service<'a>(
@@ -816,27 +807,6 @@ fn gpu_confidence(summary: &GpuActivitySummary) -> RightsizeConfidence {
     }
 }
 
-fn observed_elapsed_seconds(accounting: &AccountingSnapshot) -> Option<u64> {
-    let allocation_rows = accounting
-        .rows
-        .iter()
-        .filter(|row| !row.job_id_raw.contains('.') && !row.job_id_raw.contains('_'))
-        .filter_map(|row| row.elapsed_raw_seconds)
-        .collect::<Vec<_>>();
-    if !allocation_rows.is_empty() {
-        return allocation_rows.into_iter().max();
-    }
-    accounting
-        .rows
-        .iter()
-        .filter_map(|row| row.elapsed_raw_seconds)
-        .max()
-}
-
-fn parse_u64(raw: Option<&str>) -> Option<u64> {
-    raw?.trim().parse::<u64>().ok()
-}
-
 fn ceil_nice_memory_bytes(bytes: u64) -> u64 {
     let gib = bytes.div_ceil(GIB).max(1);
     let nice = [
@@ -851,10 +821,6 @@ fn ceil_nice_memory_bytes(bytes: u64) -> u64 {
 
 fn format_slurm_memory(bytes: u64) -> String {
     format!("{}G", bytes.div_ceil(GIB).max(1))
-}
-
-fn format_bytes_gib(bytes: u64) -> String {
-    format!("{:.1} GiB", bytes as f64 / GIB as f64)
 }
 
 fn format_slurm_duration(seconds: u64) -> String {
@@ -886,32 +852,8 @@ fn should_recommend_u32(suggested: u32, requested: u32) -> bool {
     suggested < requested && (suggested as f64) <= (requested as f64 * MEANINGFUL_REDUCTION_RATIO)
 }
 
-fn max_option(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.max(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
-
 fn max_f64(left: Option<f64>, right: f64) -> Option<f64> {
     Some(left.map_or(right, |left| left.max(right)))
-}
-
-fn service_step_name(value: &str) -> String {
-    format!("hpc-compose:{}", service_token(value))
-}
-
-fn service_token(value: &str) -> String {
-    let mut token = String::new();
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() {
-            token.push(byte as char);
-        } else {
-            token.push_str(&format!("_x{byte:02x}_"));
-        }
-    }
-    token
 }
 
 #[cfg(test)]
@@ -974,6 +916,69 @@ mod tests {
         assert_eq!(format_slurm_memory(1), "1G");
         assert_eq!(format_slurm_memory(GIB + 1), "2G");
         assert_eq!(format_slurm_memory(2_048 * GIB), "2048G");
+    }
+
+    #[test]
+    fn accounting_join_encodes_punctuation_in_service_step_names() {
+        let service = RuntimeService {
+            name: "api.worker-1".into(),
+            runtime_image: "/shared/cache/api.sqsh".into(),
+            execution: crate::planner::ExecutionSpec::ImageDefault,
+            environment: Vec::new(),
+            volumes: Vec::new(),
+            working_dir: None,
+            depends_on: Vec::new(),
+            readiness: None,
+            assertions: None,
+            failure_policy: Default::default(),
+            placement: Default::default(),
+            slurm: Default::default(),
+            prepare: None,
+            source: crate::planner::ImageSource::Remote("docker://example/api:latest".into()),
+        };
+        let row = |job_id_raw: &str, job_name: &str| AccountingRow {
+            job_id_raw: job_id_raw.into(),
+            job_name: job_name.into(),
+            state: "COMPLETED".into(),
+            exit_code: "0:0".into(),
+            elapsed_raw_seconds: Some(10),
+            alloc_cpus: Some(1),
+            cpu_time_raw_seconds: Some(10),
+            total_cpu_seconds: Some(10),
+            alloc_tres: "cpu=1".into(),
+            req_tres: "cpu=1".into(),
+            alloc_tres_map: BTreeMap::new(),
+            req_tres_map: BTreeMap::new(),
+            max_rss_bytes: None,
+            tres_usage_in_tot: String::new(),
+            tres_usage_in_tot_map: BTreeMap::new(),
+            nnodes: Some(1),
+            account: None,
+            qos: None,
+            partition: None,
+            start: None,
+            end: None,
+        };
+        let accounting = AccountingSnapshot {
+            available: true,
+            reason: None,
+            source: "sacct".into(),
+            summary: None,
+            rows: vec![
+                row("12345.0", "hpc-compose:api_x2e_worker_x2d_1"),
+                row("12345.1", "hpc-compose:api.worker-1"),
+                row("12345.2", "hpc-compose:other"),
+            ],
+        };
+
+        assert_eq!(
+            service_step_name(&service.name),
+            "hpc-compose:api_x2e_worker_x2d_1"
+        );
+        let matching = accounting_rows_for_service("12345", &service, &accounting, false);
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].job_id_raw, "12345.0");
+        assert_eq!(matching[0].job_name, "hpc-compose:api_x2e_worker_x2d_1");
     }
 
     #[test]
@@ -1043,7 +1048,7 @@ mod tests {
 
     #[test]
     fn step_memory_uses_max_rss_or_average_total() {
-        let step = StepStats {
+        let mut step = StepStats {
             step_id: "123.0".into(),
             ntasks: "4".into(),
             ave_cpu: String::new(),
@@ -1057,7 +1062,30 @@ mod tests {
             gpu_util: None,
             gpu_mem: None,
         };
-        assert_eq!(estimated_step_memory_bytes(&step), Some(8 * GIB));
+        assert_eq!(
+            estimated_step_memory_bytes(&step.max_rss, &step.ave_rss, &step.ntasks),
+            Some(8 * GIB)
+        );
+
+        step.max_rss.clear();
+        step.ave_rss = "99999999999P".into();
+        step.ntasks = "2".into();
+        assert_eq!(
+            estimated_step_memory_bytes(&step.max_rss, &step.ave_rss, &step.ntasks),
+            Some(u64::MAX)
+        );
+
+        step.ave_rss = "2G".into();
+        step.ntasks = "0".into();
+        assert_eq!(
+            estimated_step_memory_bytes(&step.max_rss, &step.ave_rss, &step.ntasks),
+            Some(2 * GIB)
+        );
+        step.ntasks = "not-a-number".into();
+        assert_eq!(
+            estimated_step_memory_bytes(&step.max_rss, &step.ave_rss, &step.ntasks),
+            Some(2 * GIB)
+        );
     }
 
     #[test]

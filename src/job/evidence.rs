@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize, de};
 use sha2::{Digest, Sha256};
 
+use super::annotation_policy::{MAX_TAGS_PER_RECORD, validate_note_text, validate_tag};
 use super::model::{JobNote, SubmissionBackend, SubmissionKind};
 use super::provenance::JobProvenance;
 
@@ -1385,7 +1386,7 @@ fn validate_annotation_text(text: &str) -> Result<()> {
 }
 
 fn validate_note(note: &JobNote) -> Result<()> {
-    let normalized = super::record::validate_note_text(&note.text)?;
+    let normalized = validate_note_text(&note.text)?;
     ensure!(
         normalized == note.text,
         "run note must already use the record layer's normalized text"
@@ -1396,14 +1397,14 @@ fn validate_note(note: &JobNote) -> Result<()> {
 
 fn canonical_tags(mut tags: Vec<String>) -> Result<Vec<String>> {
     for tag in &tags {
-        super::record::validate_tag(tag)?;
+        validate_tag(tag)?;
     }
     tags.sort();
     tags.dedup();
     ensure!(
-        tags.len() <= super::record::MAX_TAGS_PER_RECORD,
+        tags.len() <= MAX_TAGS_PER_RECORD,
         "run tag snapshot exceeds the record limit of {} tags",
-        super::record::MAX_TAGS_PER_RECORD
+        MAX_TAGS_PER_RECORD
     );
     Ok(tags)
 }

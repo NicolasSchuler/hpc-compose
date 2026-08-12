@@ -1,6 +1,18 @@
-use super::*;
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
 use crate::spec::{SweepConfig, SweepMatrix, SweepObjective};
 use crate::time_util::unix_timestamp_millis;
+use crate::tracked_paths;
+
+use super::absolute_path;
+use super::metadata_io::{read_json, write_json};
+use super::model::SweepTrialMetadata;
 
 /// Schema version for persisted sweep manifests.
 ///

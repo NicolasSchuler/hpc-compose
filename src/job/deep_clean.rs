@@ -1,13 +1,19 @@
 //! Unified cleanup planning for tracked jobs plus shared-cache residue.
 
 use std::collections::BTreeSet;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::context::repo_root_or_cwd;
+use anyhow::{Context, Result};
+use serde::Serialize;
 
-use super::*;
+use crate::time_util::{SECONDS_PER_DAY, unix_timestamp_now};
+use crate::tracked_paths;
 
-const SECONDS_PER_DAY: u64 = 86_400;
+use super::absolute_path;
+use super::record::{self, CleanupMode, CleanupReport, build_cleanup_report, run_cleanup_report};
 
 /// Extra cleanup details included by `clean --deep`.
 #[allow(missing_docs)]
@@ -46,7 +52,7 @@ pub fn build_deep_cleanup_report(
     dry_run: bool,
 ) -> Result<CleanupReport> {
     let mut report = build_cleanup_report(spec_path, mode, include_disk_usage, dry_run)?;
-    let now = scheduler::unix_timestamp_now();
+    let now = unix_timestamp_now();
     let rendezvous = crate::rendezvous::build_prune_report(cache_dir, now)?;
     let protected_job_ids = protected_runtime_job_ids(spec_path, cache_dir, include_disk_usage)?;
     let orphan_runtime_dirs = build_orphan_runtime_dir_report(
@@ -176,7 +182,8 @@ fn protected_runtime_job_ids(
     include_disk_usage: bool,
 ) -> Result<BTreeSet<String>> {
     let compose_file = absolute_path(spec_path)?;
-    let scan_root = repo_root_or_cwd(compose_file.parent().unwrap_or_else(|| Path::new(".")));
+    let scan_root =
+        crate::path_util::repo_root_or_cwd(compose_file.parent().unwrap_or_else(|| Path::new(".")));
     let mut protected = BTreeSet::new();
     let inventory = record::scan_job_inventory_from_root(&scan_root, include_disk_usage)?;
     for entry in inventory.jobs.into_iter().filter(|entry| {
@@ -317,6 +324,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::job::record::{build_submission_record, write_submission_record};
 
     fn write_compose(root: &Path, cache_dir: &Path) -> PathBuf {
         let compose = root.join("compose.yaml");

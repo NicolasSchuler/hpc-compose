@@ -1,12 +1,28 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
-use anyhow::ensure;
+use anyhow::{Context, Result, bail, ensure};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use crate::context::repo_root_or_cwd;
+use crate::runtime_plan::RuntimePlan;
+use crate::time_util::{SECONDS_PER_DAY, unix_timestamp_now};
+use crate::tracked_paths;
 
-use super::scheduler::unix_timestamp_now;
-use super::*;
+use super::annotation_policy;
+use super::deep_clean::DeepCleanupDetails;
+use super::metadata_io::{read_json, read_json_optional, write_json};
+use super::model::{
+    JobNote, RequestedWalltime, SubmissionBackend, SubmissionKind, SubmissionRecord,
+    SubmissionRecordBuildOptions, SweepTrialMetadata,
+};
+use super::provenance::JobProvenance;
+use super::{SUBMISSION_SCHEMA_VERSION, absolute_path, batch_log_path_for_backend};
 
 /// One tracked job discovered from recorded submission metadata.
 #[allow(missing_docs)]
@@ -237,7 +253,7 @@ pub fn build_submission_record_with_backend_and_options(
         .map(|service| {
             (
                 service.name.clone(),
-                log_dir.join(log_file_name_for_service(&service.name)),
+                log_dir.join(tracked_paths::log_file_name_for_service(&service.name)),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -339,11 +355,11 @@ pub fn write_submission_record(record: &SubmissionRecord) -> Result<()> {
 }
 
 /// Maximum number of tags one tracked record can carry.
-pub const MAX_TAGS_PER_RECORD: usize = 32;
+pub const MAX_TAGS_PER_RECORD: usize = annotation_policy::MAX_TAGS_PER_RECORD;
 /// Maximum length of one tag, in characters.
-pub const MAX_TAG_LEN: usize = 64;
+pub const MAX_TAG_LEN: usize = annotation_policy::MAX_TAG_LEN;
 /// Maximum length of one note text, in characters (after trimming).
-pub const MAX_NOTE_LEN: usize = 4096;
+pub const MAX_NOTE_LEN: usize = annotation_policy::MAX_NOTE_LEN;
 
 const SUBMISSION_RECORD_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const RUN_EVIDENCE_FILE_HASH_LIMIT: u64 = 16 * 1024 * 1024;
@@ -543,21 +559,7 @@ pub fn update_submission_record(
 /// Validates one tag label: non-empty, at most [`MAX_TAG_LEN`] characters, and
 /// only `[A-Za-z0-9._-]` characters.
 pub fn validate_tag(tag: &str) -> Result<()> {
-    if tag.is_empty() {
-        bail!("tag must not be empty");
-    }
-    if tag.chars().count() > MAX_TAG_LEN {
-        bail!("tag '{tag}' is longer than the maximum of {MAX_TAG_LEN} characters");
-    }
-    if !tag
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
-    {
-        bail!(
-            "tag '{tag}' contains unsupported characters; use only letters, digits, '.', '_', and '-'"
-        );
-    }
-    Ok(())
+    annotation_policy::validate_tag(tag)
 }
 
 /// Applies sorted-set tag semantics to a record's tag list: `add` then `remove`,
@@ -570,42 +572,18 @@ pub fn apply_tag_changes(
     add: &[String],
     remove: &[String],
 ) -> Result<()> {
-    for tag in add.iter().chain(remove.iter()) {
-        validate_tag(tag)?;
-    }
-    let mut set: BTreeSet<String> = existing.iter().cloned().collect();
-    for tag in add {
-        set.insert(tag.clone());
-    }
-    for tag in remove {
-        set.remove(tag.as_str());
-    }
-    if set.len() > MAX_TAGS_PER_RECORD {
-        bail!(
-            "a tracked record can carry at most {MAX_TAGS_PER_RECORD} tags ({} after this change); remove tags with 'experiment tag --remove <TAG>' first",
-            set.len()
-        );
-    }
-    *existing = set.into_iter().collect();
-    Ok(())
+    annotation_policy::apply_tag_changes(existing, add, remove)
 }
 
 /// Validates and normalizes one note text: trimmed, non-empty, at most
 /// [`MAX_NOTE_LEN`] characters. Returns the trimmed text.
 pub fn validate_note_text(text: &str) -> Result<String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        bail!("note text must not be empty");
-    }
-    if trimmed.chars().count() > MAX_NOTE_LEN {
-        bail!("note text is longer than the maximum of {MAX_NOTE_LEN} characters");
-    }
-    Ok(trimmed.to_string())
+    annotation_policy::validate_note_text(text)
 }
 
 /// Appends one timestamped note to a record's append-only note list.
 pub fn append_job_note(record: &mut SubmissionRecord, text: &str) -> Result<()> {
-    let text = validate_note_text(text)?;
+    let text = annotation_policy::validate_note_text(text)?;
     record.notes.push(JobNote {
         text,
         created_at: unix_timestamp_now(),
@@ -703,7 +681,7 @@ pub fn clean_all_except_latest(spec_path: &Path) -> Result<CleanupReport> {
 
 /// Scans the repo tree for tracked job records.
 pub fn scan_job_inventory(scan_start: &Path, include_disk_usage: bool) -> Result<JobInventoryScan> {
-    let scan_root = repo_root_or_cwd(scan_start);
+    let scan_root = crate::path_util::repo_root_or_cwd(scan_start);
     scan_job_inventory_from_root(&scan_root, include_disk_usage)
 }
 
@@ -775,7 +753,7 @@ pub fn build_cleanup_report(
         .find(|entry| entry.kind == SubmissionKind::Main && entry.is_latest)
         .map(|entry| entry.job_id.clone());
     let cutoff = match mode {
-        CleanupMode::Age { age_days } => Some(now.saturating_sub(age_days * 86_400)),
+        CleanupMode::Age { age_days } => Some(now.saturating_sub(age_days * SECONDS_PER_DAY)),
         CleanupMode::AllExceptLatest => None,
     };
 

@@ -1,3 +1,4 @@
+use crate::shell_quote::quote_if_needed_for_display;
 use crate::term;
 
 use std::ffi::OsStr;
@@ -27,7 +28,7 @@ use hpc_compose::job::{
     GpuNodeSummary, PsServiceRow, PsSnapshot, ReplayReport, SchedulerOptions, SchedulerStatus,
     StatsOptions, StatsSnapshot, SubmissionBackend, SubmissionRecord, WalltimeProgress,
     WatchOutcome, build_ps_snapshot, build_stats_snapshot_with_status,
-    collector_coverage_summaries, format_walltime_summary, runtime_job_root_for_record,
+    collector_coverage_summaries, format_walltime_summary, runtime_job_root_for_record, tail_lines,
     telemetry_coverage_warnings, walltime_progress, walltime_progress_percent,
 };
 
@@ -2772,30 +2773,19 @@ fn command_hint_for_key(
     record: &SubmissionRecord,
     selected_service: Option<&str>,
 ) -> String {
-    let compose = shell_quote(&record.compose_file.display().to_string());
-    let job = shell_quote(&record.job_id);
+    let compose = quote_if_needed_for_display(&record.compose_file.display().to_string());
+    let job = quote_if_needed_for_display(&record.job_id);
     match key {
         WatchKey::DebugHint => format!("hpc-compose debug -f {compose} --job-id {job}"),
         WatchKey::LogsHint => match selected_service {
             Some(service) => format!(
                 "hpc-compose logs -f {compose} --job-id {job} --service {} --lines 200",
-                shell_quote(service)
+                quote_if_needed_for_display(service)
             ),
             None => format!("hpc-compose logs -f {compose} --job-id {job} --lines 200"),
         },
         WatchKey::StatsHint => format!("hpc-compose stats -f {compose} --job-id {job}"),
         _ => String::new(),
-    }
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
@@ -3370,54 +3360,6 @@ fn read_new_lines(path: &Path, offset: &mut u64, pending: &mut String) -> Result
     }
 
     Ok(lines)
-}
-
-fn tail_lines(path: &Path, lines: usize) -> Result<Vec<String>> {
-    if lines == 0 {
-        return Ok(Vec::new());
-    }
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => {
-            return Err(err).with_context(|| format!("failed to open {}", path.display()));
-        }
-    };
-    let file_len = file
-        .metadata()
-        .with_context(|| format!("failed to read metadata for {}", path.display()))?
-        .len();
-    if file_len == 0 {
-        return Ok(Vec::new());
-    }
-
-    const TAIL_CHUNK_SIZE: u64 = 16 * 1024;
-    let mut position = file_len;
-    let mut newline_count = 0usize;
-    let mut chunks = Vec::new();
-    while position > 0 && newline_count <= lines {
-        let read_len = position.min(TAIL_CHUNK_SIZE) as usize;
-        position -= read_len as u64;
-        let mut chunk = vec![0_u8; read_len];
-        file.seek(SeekFrom::Start(position))
-            .with_context(|| format!("failed to seek {}", path.display()))?;
-        file.read_exact(&mut chunk)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        newline_count += chunk.iter().filter(|byte| **byte == b'\n').count();
-        chunks.push(chunk);
-    }
-
-    let total_len = chunks.iter().map(Vec::len).sum();
-    let mut bytes = Vec::with_capacity(total_len);
-    for chunk in chunks.iter().rev() {
-        bytes.extend_from_slice(chunk);
-    }
-    let raw = String::from_utf8_lossy(&bytes);
-    let mut collected = raw.lines().map(|line| line.to_string()).collect::<Vec<_>>();
-    if collected.len() > lines {
-        collected.drain(0..(collected.len() - lines));
-    }
-    Ok(collected)
 }
 
 fn capped_lines(mut lines: Vec<String>, capacity: usize) -> Vec<String> {

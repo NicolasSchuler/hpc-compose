@@ -13,10 +13,6 @@ use crate::domain::{
 use crate::spec_error::SpecError;
 use crate::suggest;
 
-// Transitional crate-internal compatibility for callers moved in the
-// subsequent job-layer commit. Memory parsing is owned by `crate::memory`.
-pub(crate) use crate::memory::{GIB, parse_memory_bytes};
-
 mod healthcheck;
 mod interpolate;
 mod load;

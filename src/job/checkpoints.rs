@@ -7,11 +7,21 @@
 //! reads nothing from the cluster filesystem: a missing or unreadable attempt is
 //! skipped and surfaced in `degraded`, never fatal.
 
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+use crate::tracked_paths;
+
+use super::metadata_io::read_json;
+use super::model::SubmissionRecord;
+use super::record::runtime_job_root_for_record;
 use super::runtime_state::ServiceRuntimeStateFile;
-use super::*;
 
 /// Attempt/requeue history for one tracked job, derived purely from local
-/// tracked state. Hand-rolled output (not a [`StatusSnapshot`]); read-only.
+/// tracked state. Hand-rolled output (not a
+/// [`StatusSnapshot`](super::scheduler::StatusSnapshot)); read-only.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CheckpointHistory {

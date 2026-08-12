@@ -1278,6 +1278,39 @@ fn env_and_terminal_helpers_cover_force_and_fallback_paths() {
 }
 
 #[test]
+fn command_hints_preserve_conditional_shell_quoting_and_exact_bytes() {
+    assert_eq!(
+        quote_if_needed_for_display("safe-token_1/path.yaml"),
+        "safe-token_1/path.yaml"
+    );
+    assert_eq!(quote_if_needed_for_display("two words"), "'two words'");
+    assert_eq!(quote_if_needed_for_display("demo'spec"), "'demo'\\''spec'");
+    assert_eq!(quote_if_needed_for_display("job:17"), "job:17");
+    assert_eq!(quote_if_needed_for_display(""), "");
+
+    let mut record = sample_snapshot().record;
+    record.compose_file = PathBuf::from("/tmp/team dir/demo'spec.yaml");
+    record.job_id = "job:17".into();
+
+    assert_eq!(
+        command_hint_for_key(WatchKey::DebugHint, &record, None),
+        "hpc-compose debug -f '/tmp/team dir/demo'\\''spec.yaml' --job-id job:17"
+    );
+    assert_eq!(
+        command_hint_for_key(WatchKey::LogsHint, &record, Some("api worker's")),
+        "hpc-compose logs -f '/tmp/team dir/demo'\\''spec.yaml' --job-id job:17 --service 'api worker'\\''s' --lines 200"
+    );
+    assert_eq!(
+        command_hint_for_key(WatchKey::LogsHint, &record, None),
+        "hpc-compose logs -f '/tmp/team dir/demo'\\''spec.yaml' --job-id job:17 --lines 200"
+    );
+    assert_eq!(
+        command_hint_for_key(WatchKey::StatsHint, &record, None),
+        "hpc-compose stats -f '/tmp/team dir/demo'\\''spec.yaml' --job-id job:17"
+    );
+}
+
+#[test]
 fn ctrl_c_maps_to_quit() {
     assert_eq!(
         map_key_event(
@@ -2013,6 +2046,42 @@ fn tail_lines_reads_large_log_suffix_and_decodes_lossily() {
     let tailed = tail_lines(&log, 2).expect("tail large log");
 
     assert_eq!(tailed, vec!["bad-\u{fffd}".to_string(), "last".to_string()]);
+}
+
+#[test]
+fn tail_lines_preserves_shared_edge_matrix() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let log = tmpdir.path().join("edge.log");
+
+    fs::write(&log, []).expect("empty log");
+    assert_eq!(
+        tail_lines(&log, 3).expect("empty tail"),
+        Vec::<String>::new()
+    );
+
+    fs::write(&log, "alpha\nβeta\n終").expect("log without trailing newline");
+    assert_eq!(
+        tail_lines(&log, 4).expect("fewer lines than limit"),
+        vec!["alpha", "βeta", "終"]
+    );
+    assert_eq!(
+        tail_lines(&log, 3).expect("exact line limit"),
+        vec!["alpha", "βeta", "終"]
+    );
+    assert_eq!(
+        tail_lines(&log, 2).expect("more lines than limit"),
+        vec!["βeta", "終"]
+    );
+    assert_eq!(
+        tail_lines(&log, 0).expect("zero limit"),
+        Vec::<String>::new()
+    );
+
+    fs::write(&log, "alpha\nβeta\n終\n").expect("log with trailing newline");
+    assert_eq!(
+        tail_lines(&log, 3).expect("trailing newline"),
+        vec!["alpha", "βeta", "終"]
+    );
 }
 
 #[test]

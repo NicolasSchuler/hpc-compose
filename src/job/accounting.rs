@@ -4,11 +4,11 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use crate::spec::parse_memory_bytes;
+use crate::memory::parse_memory_bytes;
 
+use super::analytics::{parse_tres_map, parse_u64, tres_gpu_count, tres_memory_bytes};
 use super::model::{SubmissionBackend, SubmissionRecord};
 use super::scheduler::{SchedulerCommandError, run_scheduler_command};
-use super::stats::{find_tres_value, parse_tres_map};
 
 /// Slurm accounting data returned by `stats --accounting`.
 #[allow(missing_docs)]
@@ -131,6 +131,23 @@ pub(super) fn build_accounting_snapshot(
     })
 }
 
+pub(super) fn observed_elapsed_seconds(accounting: &AccountingSnapshot) -> Option<u64> {
+    let allocation_rows = accounting
+        .rows
+        .iter()
+        .filter(|row| !row.job_id_raw.contains('.') && !row.job_id_raw.contains('_'))
+        .filter_map(|row| row.elapsed_raw_seconds)
+        .collect::<Vec<_>>();
+    if !allocation_rows.is_empty() {
+        return allocation_rows.into_iter().max();
+    }
+    accounting
+        .rows
+        .iter()
+        .filter_map(|row| row.elapsed_raw_seconds)
+        .max()
+}
+
 pub(super) fn parse_sacct_accounting_output(stdout: &str) -> Result<Vec<AccountingRow>> {
     let mut rows = Vec::new();
     for (index, raw_line) in stdout.lines().enumerate() {
@@ -165,9 +182,9 @@ pub(super) fn parse_sacct_accounting_output(stdout: &str) -> Result<Vec<Accounti
             job_name: fields[1].to_string(),
             state: fields[2].to_string(),
             exit_code: fields[3].to_string(),
-            elapsed_raw_seconds: parse_optional_u64(fields[4]),
-            alloc_cpus: parse_optional_u64(fields[5]),
-            cpu_time_raw_seconds: parse_optional_u64(fields[6]),
+            elapsed_raw_seconds: parse_u64(Some(fields[4])),
+            alloc_cpus: parse_u64(Some(fields[5])),
+            cpu_time_raw_seconds: parse_u64(Some(fields[6])),
             total_cpu_seconds: parse_slurm_accounting_duration(fields[7]),
             alloc_tres: fields[8].to_string(),
             req_tres: fields[9].to_string(),
@@ -176,7 +193,7 @@ pub(super) fn parse_sacct_accounting_output(stdout: &str) -> Result<Vec<Accounti
             max_rss_bytes: parse_memory_bytes(fields[10]),
             tres_usage_in_tot: fields[11].to_string(),
             tres_usage_in_tot_map,
-            nnodes: parse_optional_u64(fields[12]),
+            nnodes: parse_u64(Some(fields[12])),
             account: optional_string(fields[13]),
             qos: optional_string(fields[14]),
             partition: optional_string(fields[15]),
@@ -269,27 +286,6 @@ fn seconds_to_hours(seconds: f64) -> f64 {
     seconds / 3_600.0
 }
 
-fn tres_gpu_count(values: &BTreeMap<String, String>) -> Option<u64> {
-    find_tres_value(values, "gres/gpu")
-        .or_else(|| find_tres_value(values, "gpu"))
-        .and_then(|value| parse_optional_u64(&value))
-}
-
-fn tres_memory_bytes(values: &BTreeMap<String, String>) -> Option<u64> {
-    values
-        .get("mem")
-        .or_else(|| values.get("memory"))
-        .and_then(|value| parse_memory_bytes(value))
-}
-
-fn parse_optional_u64(raw: &str) -> Option<u64> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unknown") {
-        return None;
-    }
-    trimmed.parse::<u64>().ok()
-}
-
 fn parse_slurm_accounting_duration(raw: &str) -> Option<u64> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unknown") {
@@ -327,6 +323,42 @@ fn optional_string(raw: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn accounting_row(job_id_raw: &str, elapsed_raw_seconds: Option<u64>) -> AccountingRow {
+        AccountingRow {
+            job_id_raw: job_id_raw.into(),
+            job_name: String::new(),
+            state: "COMPLETED".into(),
+            exit_code: "0:0".into(),
+            elapsed_raw_seconds,
+            alloc_cpus: None,
+            cpu_time_raw_seconds: None,
+            total_cpu_seconds: None,
+            alloc_tres: String::new(),
+            req_tres: String::new(),
+            alloc_tres_map: BTreeMap::new(),
+            req_tres_map: BTreeMap::new(),
+            max_rss_bytes: None,
+            tres_usage_in_tot: String::new(),
+            tres_usage_in_tot_map: BTreeMap::new(),
+            nnodes: None,
+            account: None,
+            qos: None,
+            partition: None,
+            start: None,
+            end: None,
+        }
+    }
+
+    fn accounting_snapshot(rows: Vec<AccountingRow>) -> AccountingSnapshot {
+        AccountingSnapshot {
+            available: false,
+            reason: Some("caller must gate availability".into()),
+            source: "sacct".into(),
+            summary: None,
+            rows,
+        }
+    }
+
     #[test]
     fn accounting_duration_parser_accepts_forms_without_range_rules() {
         assert_eq!(parse_slurm_accounting_duration("90"), Some(90));
@@ -341,6 +373,36 @@ mod tests {
         // Unlike the score parser, the accounting parser does NOT apply the spec
         // walltime range rules, so out-of-range fields still parse.
         assert_eq!(parse_slurm_accounting_duration("00:90"), Some(90));
+    }
+
+    #[test]
+    fn elapsed_selection_prefers_allocation_rows_and_falls_back_when_missing() {
+        assert_eq!(
+            observed_elapsed_seconds(&accounting_snapshot(vec![
+                accounting_row("12345", Some(100)),
+                accounting_row("12345.0", Some(900)),
+                accounting_row("12345_7", Some(800)),
+            ])),
+            Some(100)
+        );
+        assert_eq!(
+            observed_elapsed_seconds(&accounting_snapshot(vec![
+                accounting_row("12345.0", Some(900)),
+                accounting_row("12345_7", Some(800)),
+            ])),
+            Some(900)
+        );
+        assert_eq!(
+            observed_elapsed_seconds(&accounting_snapshot(vec![
+                accounting_row("12345", None),
+                accounting_row("12345.0", Some(700)),
+            ])),
+            Some(700)
+        );
+        assert_eq!(
+            observed_elapsed_seconds(&accounting_snapshot(Vec::new())),
+            None
+        );
     }
 
     #[test]

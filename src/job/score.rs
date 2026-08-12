@@ -5,19 +5,24 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
+use crate::memory::parse_memory_bytes;
 use crate::runtime_plan::RuntimePlan;
-use crate::spec::{GIB, gres_gpu_count, parse_memory_bytes, parse_slurm_time_limit};
+use crate::spec::{gres_gpu_count, parse_slurm_time_limit};
 
-use super::accounting::{AccountingSnapshot, build_accounting_snapshot};
+use super::accounting::{AccountingSnapshot, build_accounting_snapshot, observed_elapsed_seconds};
+use super::analytics::{
+    estimated_step_memory_bytes, find_tres_value, format_bytes_gib, gpu_device_key, parse_f64,
+    parse_u64, tres_gpu_count, tres_memory_bytes,
+};
+use super::metadata_io::read_json;
 use super::model::{SubmissionBackend, SubmissionRecord};
-use super::read_json;
 use super::rightsize::{RightsizeConfidence, RightsizeRecommendation, build_rightsize_report};
 use super::scheduler::{build_status_snapshot, parse_scheduler_timestamp, scheduler_source_label};
 use super::stats::{
     CollectorCoverage, CollectorCoverageSummary, CollectorStatus, GpuDeviceSampleRow,
     GpuProcessSampleRow, SamplerMetaFile, SchedulerOptions, SlurmSampleRow, StepStats,
-    collector_coverage_summaries, effective_collector_coverage, find_tres_value,
-    metrics_dir_for_record, probe_step_stats, step_from_slurm_sample_row,
+    collector_coverage_summaries, effective_collector_coverage, metrics_dir_for_record,
+    probe_step_stats, step_from_slurm_sample_row,
 };
 
 const GPU_ACTIVE_UTILIZATION_PERCENT: f64 = 5.0;
@@ -353,7 +358,11 @@ fn load_gpu_sample_history(metrics_dir: &Path) -> Result<BTreeMap<String, GpuSam
             index + 1
         ))?;
         let sample = samples.entry(row.sampled_at.clone()).or_default();
-        let device_key = gpu_device_key(&row);
+        let device_key = gpu_device_key(
+            row.uuid.as_deref(),
+            row.node.as_deref(),
+            row.index.as_deref(),
+        );
         sample.seen_devices.insert(device_key);
         if let Some(value) = parse_f64(row.utilization_gpu.as_deref()) {
             sample.utilization_values.push(value);
@@ -428,7 +437,9 @@ fn load_slurm_sample_history(path: &Path) -> Result<(Vec<StepStats>, BTreeSet<St
             path.display(),
             index + 1
         ))?;
-        if step_has_cpu_activity(&step) || estimated_step_memory_bytes(&step).is_some() {
+        if step_has_cpu_activity(&step)
+            || estimated_step_memory_bytes(&step.max_rss, &step.ave_rss, &step.ntasks).is_some()
+        {
             active_timestamps.insert(sampled_at);
         }
         steps.push(step);
@@ -971,7 +982,7 @@ fn observed_memory_bytes(
 ) -> Option<u64> {
     let mut observed = steps
         .iter()
-        .filter_map(estimated_step_memory_bytes)
+        .filter_map(|step| estimated_step_memory_bytes(&step.max_rss, &step.ave_rss, &step.ntasks))
         .collect::<Vec<_>>();
     if let Some(accounting) = accounting.filter(|snapshot| snapshot.available) {
         if let Some(summary) = &accounting.summary
@@ -982,23 +993,6 @@ fn observed_memory_bytes(
         observed.extend(accounting.rows.iter().filter_map(|row| row.max_rss_bytes));
     }
     observed.into_iter().max()
-}
-
-fn observed_elapsed_seconds(accounting: &AccountingSnapshot) -> Option<u64> {
-    let allocation_rows = accounting
-        .rows
-        .iter()
-        .filter(|row| !row.job_id_raw.contains('.') && !row.job_id_raw.contains('_'))
-        .filter_map(|row| row.elapsed_raw_seconds)
-        .collect::<Vec<_>>();
-    if !allocation_rows.is_empty() {
-        return allocation_rows.into_iter().max();
-    }
-    accounting
-        .rows
-        .iter()
-        .filter_map(|row| row.elapsed_raw_seconds)
-        .max()
 }
 
 fn primary_accounting_rows(accounting: &AccountingSnapshot) -> Option<Vec<&super::AccountingRow>> {
@@ -1089,46 +1083,12 @@ fn requested_cpu_count(plan: &RuntimePlan) -> Option<u64> {
     (service_total > 0).then_some(service_total)
 }
 
-fn estimated_step_memory_bytes(step: &StepStats) -> Option<u64> {
-    let max_rss = parse_memory_bytes(&step.max_rss);
-    let ave_rss_total = parse_memory_bytes(&step.ave_rss)
-        .map(|value| value.saturating_mul(step.ntasks.trim().parse::<u64>().unwrap_or(1).max(1)));
-    max_option(max_rss, ave_rss_total)
-}
-
 fn step_has_cpu_activity(step: &StepStats) -> bool {
     parse_slurm_duration_seconds(&step.ave_cpu).is_some_and(|seconds| seconds >= CPU_ACTIVE_SECONDS)
         || find_tres_value(&step.usage_tres_in_ave_map, "cpu")
             .as_deref()
             .and_then(parse_slurm_duration_seconds)
             .is_some_and(|seconds| seconds >= CPU_ACTIVE_SECONDS)
-}
-
-fn gpu_device_key(row: &GpuDeviceSampleRow) -> String {
-    row.uuid
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            format!(
-                "{}:{}",
-                row.node.as_deref().unwrap_or("unknown-node"),
-                row.index.as_deref().unwrap_or("unknown-index")
-            )
-        })
-}
-
-fn tres_gpu_count(values: &BTreeMap<String, String>) -> Option<u64> {
-    find_tres_value(values, "gres/gpu")
-        .or_else(|| find_tres_value(values, "gpu"))
-        .and_then(|value| parse_u64(Some(&value)))
-}
-
-fn tres_memory_bytes(values: &BTreeMap<String, String>) -> Option<u64> {
-    values
-        .get("mem")
-        .or_else(|| values.get("memory"))
-        .and_then(|value| parse_memory_bytes(value))
 }
 
 fn parse_slurm_duration_seconds(raw: &str) -> Option<u64> {
@@ -1173,14 +1133,6 @@ fn parse_slurm_duration_seconds(raw: &str) -> Option<u64> {
     Some(days.saturating_mul(86_400).saturating_add(seconds))
 }
 
-fn parse_f64(raw: Option<&str>) -> Option<f64> {
-    raw?.trim().parse::<f64>().ok()
-}
-
-fn parse_u64(raw: Option<&str>) -> Option<u64> {
-    raw?.trim().parse::<u64>().ok()
-}
-
 fn parse_f64_from_slurm_value(raw: &str) -> Option<f64> {
     let trimmed = raw.trim();
     let number = trimmed
@@ -1209,23 +1161,11 @@ fn round3(value: f64) -> f64 {
     (value * 1_000.0).round() / 1_000.0
 }
 
-fn format_bytes_gib(bytes: u64) -> String {
-    format!("{:.1} GiB", bytes as f64 / GIB as f64)
-}
-
 fn format_duration_seconds(seconds: u64) -> String {
     let hours = seconds / 3_600;
     let minutes = (seconds % 3_600) / 60;
     let seconds = seconds % 60;
     format!("{hours:02}:{minutes:02}:{seconds:02}")
-}
-
-fn max_option(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.max(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
 }
 
 #[cfg(test)]

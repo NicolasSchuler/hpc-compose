@@ -1,9 +1,17 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::*;
+use super::model::{SubmissionBackend, SubmissionKind, SubmissionRecord};
+use super::provenance::JobProvenance;
+use super::scheduler::{
+    PsServiceRow, QueueDiagnostics, SchedulerStatus, StatusSnapshot,
+    build_status_snapshot_with_status, probe_scheduler_status_many,
+};
+use super::stats::{FirstFailure, SchedulerOptions};
 
 /// Compact comparison between two tracked job submissions.
 #[allow(missing_docs)]
@@ -957,6 +965,11 @@ fn value_label(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use super::super::SUBMISSION_SCHEMA_VERSION;
+    use super::super::provenance::GitProvenance;
+    use super::super::record::{state_path_for_record, write_submission_record};
     use super::*;
 
     fn local_diff_record(

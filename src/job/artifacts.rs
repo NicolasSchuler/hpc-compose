@@ -1,6 +1,24 @@
-use super::scheduler::unix_timestamp_now;
-use super::*;
+use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use flate2::Compression;
+use flate2::write::GzEncoder;
+use serde::{Deserialize, Serialize};
+use tar::Builder;
+
+use crate::time_util::unix_timestamp_now;
+use crate::tracked_paths;
+
+use super::file_digest::sha256_file;
+use super::metadata_io::{read_json, write_json};
+use super::model::SubmissionRecord;
+use super::record::{load_submission_record, runtime_job_root_for_record};
+use super::{ARTIFACT_MANIFEST_SCHEMA_VERSION, ARTIFACT_PROVENANCE_SCHEMA_VERSION};
 
 static ARTIFACT_EXPORT_TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ARTIFACT_EXPORT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -866,26 +884,10 @@ fn collect_path_metadata(
         relative_path,
         entry_type: "file".to_string(),
         size_bytes: Some(metadata.len()),
-        sha256: Some(hash_file(path)?),
+        sha256: Some(sha256_file(path)?),
         link_target: None,
     });
     Ok(())
-}
-
-fn hash_file(path: &Path) -> Result<String> {
-    let mut file = File::open(path).context(format!("failed to open {}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .context(format!("failed to read {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex::encode(hasher.finalize()))
 }
 
 fn write_bundle_tarball(
@@ -1154,6 +1156,9 @@ fn copy_symlink(source: &Path, _destination: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::SUBMISSION_SCHEMA_VERSION;
+    use super::super::model::{SubmissionBackend, SubmissionKind};
+    use super::super::record::write_submission_record;
     use super::*;
 
     fn artifact_manifest(job_id: &str) -> ArtifactManifest {
@@ -1840,19 +1845,6 @@ mod tests {
         fs::write(dir.join("inner.txt"), "x").expect("write");
         remove_existing_destination(&dir).expect("remove");
         assert!(!dir.exists());
-    }
-
-    #[test]
-    fn hash_file_produces_sha256_hex() {
-        let tmpdir = tempfile::tempdir().expect("tmpdir");
-        let file = tmpdir.path().join("data.bin");
-        fs::write(&file, "hello world").expect("write");
-        let hash = hash_file(&file).expect("hash");
-        assert_eq!(hash.len(), 64);
-        assert_eq!(
-            hash,
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-        );
     }
 
     #[test]

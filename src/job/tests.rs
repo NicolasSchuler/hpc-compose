@@ -2,16 +2,18 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 
 use super::logs::LogCursor;
+use super::metadata_io::{read_json, write_json};
 use super::runtime_state::{ServiceRuntimeStateFile, load_runtime_state};
 use super::scheduler::{
     build_batch_log_status, is_terminal_state, is_transitional_local_only,
-    reconcile_scheduler_status, stats_unavailable_reason, unix_timestamp_now,
+    reconcile_scheduler_status, stats_unavailable_reason,
 };
 use super::stats::SlurmSampleRow;
 use super::*;
 use crate::planner::{ExecutionSpec, ImageSource, ServicePlacement};
 use crate::runtime_plan::RuntimeService;
 use crate::spec::{ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig};
+use crate::time_util::unix_timestamp_now;
 
 fn runtime_plan(tmpdir: &Path) -> RuntimePlan {
     RuntimePlan {

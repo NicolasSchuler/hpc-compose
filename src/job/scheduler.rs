@@ -1,14 +1,27 @@
+use std::collections::BTreeMap;
+use std::error::Error;
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+
+use crate::process_probe::{self, ProbeError, ProbeOptions};
+use crate::time_util::{system_time_to_unix, unix_timestamp_now};
+
+use super::model::{SchedulerSource, SubmissionBackend, SubmissionRecord};
+use super::record::{load_submission_record, log_dir_for_record};
 use super::runtime_state::{
     ServiceRuntimeAssertionState, ServiceRuntimeStateEntry, ServiceRuntimeStateFile,
     active_restart_failures_in_window, load_runtime_state, runtime_state_by_service,
 };
-use super::*;
-use crate::process_probe::{self, ProbeError, ProbeOptions};
-use crate::time_util::system_time_to_unix;
-use std::error::Error;
-use std::fmt;
-use std::process::Output;
-use std::time::Duration;
+use super::stats::{CollectorCoverageSummary, SchedulerOptions};
+use super::verify::StatusVerificationReport;
+use super::watchdog::WatchdogSnapshot;
+use super::{ACCOUNTING_GAP_GRACE_SECONDS, INITIAL_SCHEDULER_LOOKUP_GRACE_SECONDS};
 
 const DEFAULT_SCHEDULER_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const SCHEDULER_COMMAND_TIMEOUT_ENV: &str = "HPC_COMPOSE_SCHEDULER_COMMAND_TIMEOUT_MS";
@@ -1113,10 +1126,6 @@ pub(crate) fn stats_unavailable_reason(scheduler: &SchedulerStatus) -> String {
     }
 }
 
-pub(crate) fn unix_timestamp_now() -> u64 {
-    crate::time_util::unix_timestamp_now()
-}
-
 fn probe_status_components(
     job_id: &str,
     options: &SchedulerOptions,
@@ -1682,6 +1691,8 @@ pub(crate) fn cancel_job(job_id: &str, scancel_bin: &str) -> Result<()> {
 mod tests {
     use crate::job::runtime_state::{ServiceRuntimeStateEntry, ServiceRuntimeStateFile};
 
+    use super::super::SUBMISSION_SCHEMA_VERSION;
+    use super::super::model::{RequestedWalltime, SubmissionKind};
     use super::*;
 
     fn runtime_entry() -> ServiceRuntimeStateEntry {

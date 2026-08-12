@@ -1,15 +1,31 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::spec::{ComposeSpec, EffectiveComposeConfig};
+use crate::time_util::unix_timestamp_now;
+use crate::tracked_paths;
 
 use super::accounting::{AccountingSnapshot, build_accounting_snapshot};
+use super::analytics::{find_tres_value, parse_tres_map};
+use super::metadata_io::read_json;
+use super::model::{SubmissionBackend, SubmissionRecord};
+use super::record::{
+    load_submission_record, load_submission_record_optional, runtime_job_root_for_record,
+};
 use super::runtime_state::{ServiceRuntimeStateFile, load_runtime_state};
 use super::scheduler::{
-    SchedulerCommandError, SchedulerCommandUnavailable, build_local_scheduler_status,
-    command_unavailable_detail, command_unavailable_error, reconcile_scheduler_status,
-    run_scheduler_command, stats_unavailable_reason, unix_timestamp_now,
+    SchedulerCommandError, SchedulerCommandUnavailable, SchedulerStatus,
+    build_local_scheduler_status, command_unavailable_detail, command_unavailable_error,
+    probe_scheduler_status, reconcile_scheduler_status, run_scheduler_command,
+    stats_unavailable_reason,
 };
-use super::*;
+use super::watchdog::WatchdogSnapshot;
 
 /// Combined metrics and scheduler view returned by the `stats` command.
 #[allow(missing_docs)]
@@ -651,7 +667,8 @@ pub fn build_stats_snapshot(
 }
 
 /// Builds the tracked metrics snapshot reusing an already-probed raw scheduler
-/// status (from [`probe_scheduler_status_many`]) instead of re-probing.
+/// status (from [`super::scheduler::probe_scheduler_status_many`]) instead of
+/// re-probing.
 ///
 /// The prefetched status is used only for Slurm-backed records; local records
 /// derive their status from runtime state. Callers batching probes over a whole
@@ -1639,34 +1656,6 @@ pub(crate) fn parse_sstat_output(job_id: &str, stdout: &str) -> Result<Vec<StepS
     Ok(steps)
 }
 
-pub(super) fn parse_tres_map(raw: &str) -> Result<BTreeMap<String, String>> {
-    let mut values = BTreeMap::new();
-    for segment in raw.split(',') {
-        let segment = segment.trim();
-        if segment.is_empty() {
-            continue;
-        }
-        let (key, value) = segment
-            .split_once('=')
-            .context(format!("invalid TRES entry '{segment}'"))?;
-        values.insert(key.trim().to_string(), value.trim().to_string());
-    }
-    Ok(values)
-}
-
-pub(super) fn find_tres_value(values: &BTreeMap<String, String>, key: &str) -> Option<String> {
-    if let Some(value) = values.get(key) {
-        return Some(value.clone());
-    }
-    let prefix = format!("{key}:");
-    for (candidate, value) in values {
-        if candidate.starts_with(&prefix) {
-            return Some(value.clone());
-        }
-    }
-    None
-}
-
 fn is_numbered_step(job_id: &str, step_id: &str) -> bool {
     let Some(suffix) = step_id
         .strip_prefix(job_id)
@@ -2159,19 +2148,24 @@ mod tests {
 
     #[test]
     fn stats_parser_helpers_cover_error_and_prefix_paths() {
-        let mut tres = BTreeMap::new();
-        tres.insert("gres/gpu:tesla".to_string(), "2".to_string());
+        let mut tres =
+            parse_tres_map(" , cpu=1, gres/gpu:zeta=7, cpu=4, gres/gpu:alpha=2, ").expect("tres");
+        assert_eq!(tres.get("cpu").map(String::as_str), Some("4"));
+        assert_eq!(find_tres_value(&tres, "gres/gpu").as_deref(), Some("2"));
+        tres.insert("gres/gpu".to_string(), "3".to_string());
+        assert_eq!(find_tres_value(&tres, "gres/gpu").as_deref(), Some("3"));
+        tres.remove("gres/gpu");
         assert_eq!(find_tres_value(&tres, "gres/gpu").as_deref(), Some("2"));
         assert!(!is_numbered_step("123", "123.batch"));
         assert!(is_numbered_step("123", "123.0"));
 
         let parsed = parse_tres_map(" , cpu=1 ,, gres/gpumem:tesla=8192M ").expect("tres");
         assert_eq!(parsed.get("cpu").map(String::as_str), Some("1"));
-        assert!(
-            parse_tres_map("broken-entry")
+        assert_eq!(
+            parse_tres_map(" cpu=1, broken-entry ")
                 .expect_err("invalid tres")
-                .to_string()
-                .contains("invalid TRES entry")
+                .to_string(),
+            "invalid TRES entry 'broken-entry'"
         );
 
         let row = SlurmSampleRow {
