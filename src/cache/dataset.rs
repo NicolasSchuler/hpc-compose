@@ -7,9 +7,10 @@
 //!
 //! It performs **zero network I/O**: materialization is an injected closure, so
 //! the actual fetch (e.g. an `hf://` download) lives entirely in the caller.
-//! Tracking metadata is recorded as a sidecar manifest via
-//! [`crate::cache::upsert_dataset_manifest`], so `cache list`/`cache prune`
-//! transparently see staged inputs alongside image artifacts.
+//! Tracking metadata is recorded through the private sidecar implementation;
+//! the stable [`crate::cache::upsert_dataset_manifest`] wrapper exposes the same
+//! layout to callers, and `cache list`/`cache prune` transparently see staged
+//! inputs alongside image artifacts.
 //!
 //! Atomicity: a fresh build writes its in-directory completion record while
 //! materializing in a temporary sibling, then atomically renames that complete
@@ -26,8 +27,15 @@ use serde::{Deserialize, Serialize};
 use crate::cache::CacheEntryKind;
 use crate::domain::{artifact_cache_key, short_digest_prefix};
 
+mod manifest;
 mod store;
 
+#[cfg(test)]
+pub(super) use manifest::sidecar_manifest_path_for_suffix;
+pub(super) use manifest::{
+    artifact_path_from_sidecar, has_sidecar, is_sidecar_path, sidecar_path_for_cache_kind,
+    touch as touch_manifest, upsert as upsert_manifest,
+};
 pub(super) use store::StagedInputCompletion;
 
 /// The kind of staged input. Used both to pick the on-disk subdirectory and to
@@ -55,17 +63,6 @@ impl StagedInputKind {
         match self {
             StagedInputKind::Dataset => "datasets",
             StagedInputKind::Model => "models",
-            StagedInputKind::Source => "source",
-        }
-    }
-
-    /// The sidecar-manifest filename suffix for this kind
-    /// (`<dir>.dataset.json`/`<dir>.model.json`).
-    #[must_use]
-    fn sidecar_suffix(self) -> &'static str {
-        match self {
-            StagedInputKind::Dataset => "dataset",
-            StagedInputKind::Model => "model",
             StagedInputKind::Source => "source",
         }
     }
@@ -391,21 +388,6 @@ pub fn dataset_cache_key(spec: &StagedInputSpec) -> String {
 #[must_use]
 pub fn staged_input_dir(cache_dir: &Path, kind: StagedInputKind, key: &str) -> PathBuf {
     cache_dir.join(kind.as_dir_segment()).join(key)
-}
-
-/// The sidecar-manifest path for a staged directory, given the kind suffix.
-///
-/// Returns the `<staged_dir>.{dataset,model}.json` sibling of the directory.
-/// Crate-internal: `crate::cache` resolves the sidecar for removal/upsert via
-/// this so both modules agree on the layout.
-#[must_use]
-pub(super) fn sidecar_manifest_path_for_suffix(staged_dir: &Path, suffix: &str) -> PathBuf {
-    let mut name = staged_dir
-        .file_name()
-        .map(std::ffi::OsStr::to_os_string)
-        .unwrap_or_default();
-    name.push(format!(".{suffix}.json"));
-    staged_dir.with_file_name(name)
 }
 
 pub(super) fn read_staged_completion(staged_dir: &Path) -> Result<Option<StagedInputCompletion>> {

@@ -327,42 +327,7 @@ pub fn upsert_dataset_manifest(
     revision: Option<&str>,
     content_digest: Option<&str>,
 ) -> Result<CacheEntryManifest> {
-    let suffix = staged_kind_suffix(&kind);
-    let manifest_path = dataset::sidecar_manifest_path_for_suffix(staged_dir, suffix);
-    with_manifest_lock(staged_dir, || {
-        let now = unix_timestamp_now();
-        let mut manifest =
-            read_staged_manifest_if_exists(&manifest_path)?.unwrap_or_else(|| CacheEntryManifest {
-                kind: kind.clone(),
-                artifact_path: staged_dir.display().to_string(),
-                service_names: Vec::new(),
-                cache_key: cache_key.to_string(),
-                source_image: uri.to_string(),
-                registry: None,
-                prepare_commands: Vec::new(),
-                prepare_env: Vec::new(),
-                prepare_root: None,
-                prepare_mounts: Vec::new(),
-                force_rebuild_due_to_mounts: false,
-                created_at: now,
-                last_used_at: now,
-                tool_version: env!("CARGO_PKG_VERSION").to_string(),
-                uri: Some(uri.to_string()),
-                revision: revision.map(str::to_string),
-                content_digest: content_digest.map(str::to_string),
-            });
-        manifest.kind = kind.clone();
-        manifest.artifact_path = staged_dir.display().to_string();
-        manifest.cache_key = cache_key.to_string();
-        manifest.source_image = uri.to_string();
-        manifest.uri = Some(uri.to_string());
-        manifest.revision = revision.map(str::to_string);
-        manifest.content_digest = content_digest.map(str::to_string);
-        manifest.last_used_at = now;
-        manifest.tool_version = env!("CARGO_PKG_VERSION").to_string();
-        write_manifest_to(&manifest_path, &manifest)?;
-        Ok(manifest)
-    })
+    dataset::upsert_manifest(staged_dir, kind, cache_key, uri, revision, content_digest)
 }
 
 /// Refreshes the `last_used_at` timestamp on a staged-input sidecar manifest.
@@ -374,25 +339,7 @@ pub fn upsert_dataset_manifest(
 ///
 /// Returns an error when an existing manifest cannot be read or written back.
 pub fn touch_dataset_manifest(staged_dir: &Path, kind: CacheEntryKind) -> Result<()> {
-    let suffix = staged_kind_suffix(&kind);
-    let manifest_path = dataset::sidecar_manifest_path_for_suffix(staged_dir, suffix);
-    with_manifest_lock(staged_dir, || {
-        let Some(mut manifest) = read_staged_manifest_if_exists(&manifest_path)? else {
-            return Ok(());
-        };
-        manifest.last_used_at = unix_timestamp_now();
-        write_manifest_to(&manifest_path, &manifest)
-    })
-}
-
-fn staged_kind_suffix(kind: &CacheEntryKind) -> &'static str {
-    match kind {
-        CacheEntryKind::Model => "model",
-        CacheEntryKind::Source => "source",
-        // The CAS only ever upserts Dataset/Model/Source; default the rest to
-        // dataset so a misuse still produces a deterministic, scannable sidecar.
-        _ => "dataset",
-    }
+    dataset::touch_manifest(staged_dir, kind)
 }
 
 /// Test-only: read a staged-input sidecar manifest at an explicit path.
@@ -402,7 +349,7 @@ fn read_staged_manifest_for_test(manifest_path: &Path) -> CacheEntryManifest {
     serde_json::from_str(&raw).expect("parse staged manifest")
 }
 
-fn read_staged_manifest_if_exists(manifest_path: &Path) -> Result<Option<CacheEntryManifest>> {
+fn read_manifest_file_if_exists(manifest_path: &Path) -> Result<Option<CacheEntryManifest>> {
     if !manifest_path.exists() {
         return Ok(None);
     }
@@ -696,7 +643,7 @@ fn remove_manifest_and_artifact_if(
     .transpose()?;
     with_manifest_lock(&artifact, || {
         let manifest_path = sidecar_manifest_path_for_kind(&artifact, &selected.kind);
-        let mut current = match read_staged_manifest_if_exists(&manifest_path)? {
+        let mut current = match read_manifest_file_if_exists(&manifest_path)? {
             Some(current) => current,
             None => match staged_input_manifest_from_marker(&artifact)? {
                 Some(current) => current,
@@ -753,14 +700,8 @@ fn remove_manifest_and_artifact_unlocked(
 /// staged inputs use the `<staged_dir>.{dataset,model}.json` sidecar so the
 /// directory artifact itself stays free of metadata.
 fn sidecar_manifest_path_for_kind(artifact: &Path, kind: &CacheEntryKind) -> PathBuf {
-    match kind {
-        CacheEntryKind::Dataset => dataset::sidecar_manifest_path_for_suffix(artifact, "dataset"),
-        CacheEntryKind::Model => dataset::sidecar_manifest_path_for_suffix(artifact, "model"),
-        CacheEntryKind::Source => dataset::sidecar_manifest_path_for_suffix(artifact, "source"),
-        CacheEntryKind::Base | CacheEntryKind::Prepared | CacheEntryKind::Unknown => {
-            manifest_path_for(artifact)
-        }
-    }
+    dataset::sidecar_path_for_cache_kind(artifact, kind)
+        .unwrap_or_else(|| manifest_path_for(artifact))
 }
 
 /// Collision-safe removal of now-empty parent dirs after an artifact entry is
@@ -807,39 +748,29 @@ fn image_source_string(source: &ImageSource) -> String {
 }
 
 fn looks_like_manifest_path(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| {
-            name.ends_with(".sqsh.json")
-                || name.ends_with(".squashfs.json")
-                || name.ends_with(".sif.json")
-                || name.ends_with(".dataset.json")
-                || name.ends_with(".model.json")
-                || name.ends_with(".source.json")
-        })
-        .unwrap_or(false)
+    dataset::is_sidecar_path(path)
+        || path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| {
+                name.ends_with(".sqsh.json")
+                    || name.ends_with(".squashfs.json")
+                    || name.ends_with(".sif.json")
+            })
+            .unwrap_or(false)
 }
 
 /// Whether `path`'s file name is a staged-input sidecar
-/// (`<dir>.dataset.json`/`<dir>.model.json`).
+/// (`<dir>.dataset.json`/`<dir>.model.json`/`<dir>.source.json`).
 fn is_staged_input_sidecar(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| {
-            name.ends_with(".dataset.json")
-                || name.ends_with(".model.json")
-                || name.ends_with(".source.json")
-        })
-        .unwrap_or(false)
+    dataset::is_sidecar_path(path)
 }
 
 /// Whether `dir` is a staged-input store directory, detected by either a
 /// sibling `<dir>.{dataset,model}.json` tracking sidecar, the atomic in-dir CAS
 /// completion record, or the cluster-side hf:// completion marker.
 fn is_staged_input_dir(dir: &Path) -> bool {
-    dataset::sidecar_manifest_path_for_suffix(dir, "dataset").is_file()
-        || dataset::sidecar_manifest_path_for_suffix(dir, "model").is_file()
-        || dataset::sidecar_manifest_path_for_suffix(dir, "source").is_file()
+    dataset::has_sidecar(dir)
         || dir.join(dataset::STAGED_COMPLETE_MARKER).is_file()
         || dir.join(dataset::HF_COMPLETE_MARKER).is_file()
 }
@@ -851,10 +782,7 @@ fn is_staged_input_dir(dir: &Path) -> bool {
 /// recognized `datasets`/`models` staged dir.
 fn staged_input_manifest_from_marker(dir: &Path) -> Result<Option<CacheEntryManifest>> {
     let completion = dataset::read_staged_completion(dir)?;
-    if dataset::sidecar_manifest_path_for_suffix(dir, "dataset").is_file()
-        || dataset::sidecar_manifest_path_for_suffix(dir, "model").is_file()
-        || dataset::sidecar_manifest_path_for_suffix(dir, "source").is_file()
-    {
+    if dataset::has_sidecar(dir) {
         return Ok(None);
     }
     if let Some(completion) = completion {
@@ -925,6 +853,9 @@ fn staged_input_manifest_from_marker(dir: &Path) -> Result<Option<CacheEntryMani
 }
 
 fn artifact_path_from_manifest_path(path: &Path) -> PathBuf {
+    if let Some(artifact) = dataset::artifact_path_from_sidecar(path) {
+        return artifact;
+    }
     let filename = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -933,12 +864,7 @@ fn artifact_path_from_manifest_path(path: &Path) -> PathBuf {
     // the staged DIRECTORY: stripping the full suffix reconstructs that
     // directory, not a phantom `<staged_dir>.dataset` file. Image manifests are
     // `<artifact>.json` and strip only the trailing `.json`.
-    let artifact_filename = filename
-        .strip_suffix(".dataset.json")
-        .or_else(|| filename.strip_suffix(".model.json"))
-        .or_else(|| filename.strip_suffix(".source.json"))
-        .or_else(|| filename.strip_suffix(".json"))
-        .unwrap_or(filename);
+    let artifact_filename = filename.strip_suffix(".json").unwrap_or(filename);
     path.with_file_name(artifact_filename)
 }
 
@@ -1770,6 +1696,107 @@ mod tests {
         let round: CacheEntryManifest =
             serde_json::from_str(&reserialized).expect("re-parse unknown kind");
         assert_eq!(round.kind, CacheEntryKind::Unknown);
+    }
+
+    #[test]
+    fn staged_manifest_public_wrappers_preserve_paths_kinds_and_exact_json() {
+        let tmpdir = tempfile::tempdir().expect("tmpdir");
+        let cases = [
+            (CacheEntryKind::Dataset, "dataset", "dataset"),
+            (CacheEntryKind::Model, "model", "model"),
+            (CacheEntryKind::Source, "source", "source"),
+            // Unsupported staged-manifest kinds retain the historical dataset
+            // suffix fallback so misuse remains deterministic and scannable.
+            (CacheEntryKind::Unknown, "unknown", "dataset"),
+        ];
+
+        for (kind, kind_json, suffix) in cases {
+            let label = kind_json;
+            let staged_dir = tmpdir.path().join(format!("{label}-entry"));
+            fs::create_dir(&staged_dir).expect("staged dir");
+            let cache_key = format!("{label}-key");
+            let uri = format!("fixture://{label}");
+            let revision = format!("{label}-revision");
+            let digest = format!("sha256:{label}");
+
+            let manifest = upsert_dataset_manifest(
+                &staged_dir,
+                kind.clone(),
+                &cache_key,
+                &uri,
+                Some(&revision),
+                Some(&digest),
+            )
+            .expect("upsert staged manifest through public wrapper");
+            let sidecar = staged_dir.with_file_name(format!("{label}-entry.{suffix}.json"));
+            let raw = fs::read_to_string(&sidecar).expect("staged sidecar");
+            let staged_dir_json = serde_json::to_string(&staged_dir.display().to_string())
+                .expect("serialize staged path");
+            assert_eq!(manifest.kind, kind);
+            assert_eq!(manifest.artifact_path, staged_dir.display().to_string());
+            assert_eq!(manifest.cache_key, cache_key);
+            assert_eq!(manifest.source_image, uri);
+            assert_eq!(manifest.uri.as_deref(), Some(uri.as_str()));
+            assert_eq!(manifest.revision.as_deref(), Some(revision.as_str()));
+            assert_eq!(manifest.content_digest.as_deref(), Some(digest.as_str()));
+            assert_eq!(manifest.created_at, manifest.last_used_at);
+            assert_eq!(
+                raw,
+                format!(
+                    concat!(
+                        "{{\n",
+                        "  \"kind\": \"{}\",\n",
+                        "  \"artifact_path\": {},\n",
+                        "  \"service_names\": [],\n",
+                        "  \"cache_key\": \"{}\",\n",
+                        "  \"source_image\": \"{}\",\n",
+                        "  \"registry\": null,\n",
+                        "  \"prepare_commands\": [],\n",
+                        "  \"prepare_env\": [],\n",
+                        "  \"prepare_root\": null,\n",
+                        "  \"prepare_mounts\": [],\n",
+                        "  \"force_rebuild_due_to_mounts\": false,\n",
+                        "  \"created_at\": {},\n",
+                        "  \"last_used_at\": {},\n",
+                        "  \"tool_version\": \"{}\",\n",
+                        "  \"uri\": \"{}\",\n",
+                        "  \"revision\": \"{}\",\n",
+                        "  \"content_digest\": \"{}\"\n",
+                        "}}"
+                    ),
+                    kind_json,
+                    staged_dir_json,
+                    cache_key,
+                    uri,
+                    manifest.created_at,
+                    manifest.last_used_at,
+                    env!("CARGO_PKG_VERSION"),
+                    uri,
+                    revision,
+                    digest,
+                )
+            );
+
+            let mut seeded: CacheEntryManifest =
+                serde_json::from_str(&raw).expect("parse staged sidecar");
+            seeded.last_used_at = 0;
+            fs::write(
+                &sidecar,
+                serde_json::to_string_pretty(&seeded).expect("serialize seeded manifest"),
+            )
+            .expect("seed old last-used timestamp");
+            touch_dataset_manifest(&staged_dir, kind).expect("touch through public wrapper");
+            let touched_raw = fs::read_to_string(&sidecar).expect("touched staged sidecar");
+            let touched: CacheEntryManifest =
+                serde_json::from_str(&touched_raw).expect("parse touched staged sidecar");
+            assert_eq!(touched.created_at, manifest.created_at);
+            assert!(touched.last_used_at > 0);
+            seeded.last_used_at = touched.last_used_at;
+            assert_eq!(
+                touched_raw,
+                serde_json::to_string_pretty(&seeded).expect("serialize expected touched manifest")
+            );
+        }
     }
 
     #[test]

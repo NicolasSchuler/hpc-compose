@@ -9,9 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     STAGED_COMPLETE_MARKER, StagedInputAction, StagedInputKind, StagedInputProof, StagedInputSpec,
-    dataset_cache_key, sidecar_manifest_path_for_suffix, staged_input_dir,
+    dataset_cache_key, manifest, staged_input_dir,
 };
-use crate::cache;
 
 const STAGED_COMPLETION_VERSION: u32 = 1;
 static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -72,7 +71,7 @@ fn write_staged_completion(staged_dir: &Path, completion: &StagedInputCompletion
 }
 
 fn refresh_tracking_manifest(staged_dir: &Path, completion: &StagedInputCompletion) -> Result<()> {
-    cache::upsert_dataset_manifest(
+    manifest::upsert(
         staged_dir,
         completion.kind.manifest_kind(),
         &completion.cache_key,
@@ -109,8 +108,8 @@ fn migrate_legacy_completion(
     spec: &StagedInputSpec,
     key: &str,
 ) -> Result<Option<StagedInputCompletion>> {
-    let sidecar = sidecar_manifest_path_for_suffix(staged_dir, spec.kind.sidecar_suffix());
-    let Some(manifest) = cache::read_staged_manifest_if_exists(&sidecar)? else {
+    let sidecar = manifest::sidecar_path_for_staged_kind(staged_dir, spec.kind);
+    let Some(manifest) = manifest::read_if_exists(&sidecar)? else {
         return Ok(None);
     };
     if manifest.kind != spec.kind.manifest_kind()
@@ -284,10 +283,7 @@ fn rename_dir_noreplace(_source: &Path, _destination: &Path) -> std::io::Result<
 fn unique_temp_dir(dir: &Path) -> PathBuf {
     let pid = std::process::id();
     let counter = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    let nanos = crate::time_util::unix_timestamp_nanos();
     let mut name = dir
         .file_name()
         .map(std::ffi::OsStr::to_os_string)
@@ -300,6 +296,7 @@ fn unique_temp_dir(dir: &Path) -> PathBuf {
 mod tests {
     use std::fs;
 
+    use super::super::manifest::sidecar_manifest_path_for_suffix;
     use super::*;
     use crate::cache::CacheEntryKind;
 
