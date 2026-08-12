@@ -600,11 +600,34 @@ pub fn resolve_with_compose_text(
     resolve_inner(request, Some(compose_text))
 }
 
-fn resolve_inner(
-    request: &ResolveRequest,
-    compose_text_override: Option<&str>,
-) -> Result<ResolvedContext> {
-    let settings_path = if let Some(path) = request.settings_file.as_ref() {
+struct SelectedSettings {
+    path: Option<PathBuf>,
+    settings: Option<Settings>,
+    profile_name: Option<String>,
+}
+
+impl SelectedSettings {
+    fn profile(&self) -> Option<&SettingsProfile> {
+        let name = self.profile_name.as_ref()?;
+        let settings = self
+            .settings
+            .as_ref()
+            .expect("a selected profile must have loaded settings");
+        Some(
+            settings
+                .profiles
+                .get(name)
+                .expect("the selected profile was validated during settings selection"),
+        )
+    }
+
+    fn defaults(&self) -> Option<&SettingsDefaults> {
+        self.settings.as_ref().map(|settings| &settings.defaults)
+    }
+}
+
+fn select_settings(request: &ResolveRequest) -> Result<SelectedSettings> {
+    let path = if let Some(path) = request.settings_file.as_ref() {
         if !path.exists() {
             bail!("settings file does not exist: {}", path.display());
         }
@@ -613,23 +636,22 @@ fn resolve_inner(
         discover_settings_path(&request.cwd)
     };
 
-    let settings = match settings_path.as_ref() {
+    let settings = match path.as_ref() {
         Some(path) => Some(load_settings(path)?),
         None => None,
     };
 
-    let selected_profile = request.profile.clone().or_else(|| {
+    let profile_name = request.profile.clone().or_else(|| {
         settings
             .as_ref()
-            .and_then(|cfg| cfg.default_profile.clone())
+            .and_then(|settings| settings.default_profile.clone())
     });
-    let profile_cfg = match (settings.as_ref(), selected_profile.as_ref()) {
-        (Some(cfg), Some(name)) => {
-            let profile = cfg
+    match (settings.as_ref(), profile_name.as_ref()) {
+        (Some(settings), Some(name)) => {
+            settings
                 .profiles
                 .get(name)
                 .with_context(|| format!("profile '{name}' is not defined in settings"))?;
-            Some(profile)
         }
         (None, Some(name)) => {
             bail!(
@@ -638,11 +660,26 @@ fn resolve_inner(
                 SETTINGS_RELATIVE_PATH
             );
         }
-        _ => None,
-    };
-    let defaults_cfg = settings.as_ref().map(|cfg| &cfg.defaults);
+        _ => {}
+    }
 
-    let settings_base = settings_path
+    Ok(SelectedSettings {
+        path,
+        settings,
+        profile_name,
+    })
+}
+
+fn resolve_inner(
+    request: &ResolveRequest,
+    compose_text_override: Option<&str>,
+) -> Result<ResolvedContext> {
+    let selected = select_settings(request)?;
+    let profile_cfg = selected.profile();
+    let defaults_cfg = selected.defaults();
+
+    let settings_base = selected
+        .path
         .as_deref()
         .map(settings_base_dir)
         .unwrap_or_else(|| request.cwd.clone());
@@ -734,20 +771,21 @@ fn resolve_inner(
         interpolation_vars.insert(name, value);
     }
 
-    let resolved_settings_base_dir = settings_path.as_deref().map(settings_base_dir);
+    let resolved_settings_base_dir = selected.path.as_deref().map(settings_base_dir);
 
     Ok(ResolvedContext {
         cwd: request.cwd.clone(),
-        settings_path,
+        settings_path: selected.path.clone(),
         settings_base_dir: resolved_settings_base_dir,
-        selected_profile,
+        selected_profile: selected.profile_name.clone(),
         compose_file,
         cache_dir,
         login_host,
         login_user,
         enroot_temp_dir,
         workspace,
-        resource_profiles: settings
+        resource_profiles: selected
+            .settings
             .as_ref()
             .map(|settings| settings.resource_profiles.clone())
             .unwrap_or_default(),
@@ -758,7 +796,8 @@ fn resolve_inner(
             .unwrap_or_else(default_huggingface_cli_bin),
         interpolation_vars,
         interpolation_var_sources,
-        watch: settings
+        watch: selected
+            .settings
             .as_ref()
             .map(|settings| settings.watch.clone())
             .unwrap_or_default(),
@@ -773,44 +812,9 @@ fn resolve_inner(
 /// Returns an error when settings parsing fails, a requested profile is
 /// missing, or a requested settings file path does not exist.
 pub fn resolve_binaries_only(request: &ResolveRequest) -> Result<ResolvedBinaries> {
-    let settings_path = if let Some(path) = request.settings_file.as_ref() {
-        if !path.exists() {
-            bail!("settings file does not exist: {}", path.display());
-        }
-        Some(crate::path_util::absolute_path(path, &request.cwd))
-    } else {
-        discover_settings_path(&request.cwd)
-    };
-
-    let settings = match settings_path.as_ref() {
-        Some(path) => Some(load_settings(path)?),
-        None => None,
-    };
-
-    let selected_profile = request.profile.clone().or_else(|| {
-        settings
-            .as_ref()
-            .and_then(|cfg| cfg.default_profile.clone())
-    });
-    let profile_cfg = match (settings.as_ref(), selected_profile.as_ref()) {
-        (Some(cfg), Some(name)) => {
-            let profile = cfg
-                .profiles
-                .get(name)
-                .with_context(|| format!("profile '{name}' is not defined in settings"))?;
-            Some(profile)
-        }
-        (None, Some(name)) => {
-            bail!(
-                "profile '{}' was requested, but no settings file was found (expected {} in this repository tree)",
-                name,
-                SETTINGS_RELATIVE_PATH
-            );
-        }
-        _ => None,
-    };
-
-    let defaults_cfg = settings.as_ref().map(|cfg| &cfg.defaults);
+    let selected = select_settings(request)?;
+    let profile_cfg = selected.profile();
+    let defaults_cfg = selected.defaults();
     Ok(resolve_binaries(
         &request.binary_overrides,
         profile_cfg.map(|profile| &profile.binaries),
@@ -1674,6 +1678,170 @@ mod tests {
                 path.display()
             )
         );
+    }
+
+    #[test]
+    fn resolve_binaries_only_preserves_settings_and_missing_profile_errors() {
+        let tmp = tempfile::tempdir().expect("tmp");
+
+        let missing_settings = tmp.path().join("missing-settings.toml");
+        let error = resolve_binaries_only(&ResolveRequest {
+            cwd: tmp.path().to_path_buf(),
+            settings_file: Some(missing_settings.clone()),
+            ..ResolveRequest::default()
+        })
+        .expect_err("missing explicit settings");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "settings file does not exist: {}",
+                missing_settings.display()
+            )
+        );
+
+        let malformed_settings = tmp.path().join("malformed-settings.toml");
+        fs::write(&malformed_settings, "version = [\n").expect("malformed settings");
+        let error = resolve_binaries_only(&ResolveRequest {
+            cwd: tmp.path().to_path_buf(),
+            settings_file: Some(malformed_settings.clone()),
+            ..ResolveRequest::default()
+        })
+        .expect_err("malformed explicit settings");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "failed to parse settings file {}",
+                malformed_settings.display()
+            )
+        );
+
+        let no_settings = tmp.path().join("no-settings");
+        fs::create_dir(&no_settings).expect("no-settings dir");
+        let error = resolve_binaries_only(&ResolveRequest {
+            cwd: no_settings,
+            profile: Some("missing".into()),
+            ..ResolveRequest::default()
+        })
+        .expect_err("profile without settings");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "profile 'missing' was requested, but no settings file was found (expected {} in this repository tree)",
+                SETTINGS_RELATIVE_PATH
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_binaries_only_preserves_undefined_explicit_and_default_profile_errors() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let settings_path = tmp.path().join("settings.toml");
+        let settings = Settings {
+            default_profile: Some("undefined-default".into()),
+            ..Settings::default()
+        };
+        write_settings(&settings_path, &settings).expect("settings");
+
+        let error = resolve_binaries_only(&ResolveRequest {
+            cwd: tmp.path().to_path_buf(),
+            profile: Some("undefined-explicit".into()),
+            settings_file: Some(settings_path.clone()),
+            ..ResolveRequest::default()
+        })
+        .expect_err("undefined explicit profile");
+        assert_eq!(
+            error.to_string(),
+            "profile 'undefined-explicit' is not defined in settings"
+        );
+
+        let error = resolve_binaries_only(&ResolveRequest {
+            cwd: tmp.path().to_path_buf(),
+            settings_file: Some(settings_path),
+            ..ResolveRequest::default()
+        })
+        .expect_err("undefined default profile");
+        assert_eq!(
+            error.to_string(),
+            "profile 'undefined-default' is not defined in settings"
+        );
+    }
+
+    #[test]
+    fn resolve_binaries_only_preserves_cli_profile_defaults_builtin_precedence() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let settings_path = tmp.path().join("settings.toml");
+        let mut settings = Settings {
+            default_profile: Some("unused-default".into()),
+            ..Settings::default()
+        };
+        settings.defaults.binaries.srun = Some("/defaults/srun".into());
+        settings.defaults.binaries.squeue = Some("/defaults/squeue".into());
+        settings.defaults.binaries.sacct = Some("/defaults/sacct".into());
+        let mut selected = SettingsProfile::default();
+        selected.binaries.srun = Some("/profile/srun".into());
+        selected.binaries.squeue = Some("/profile/squeue".into());
+        settings.profiles.insert("selected".into(), selected);
+        settings
+            .profiles
+            .insert("unused-default".into(), SettingsProfile::default());
+        write_settings(&settings_path, &settings).expect("settings");
+
+        let binaries = resolve_binaries_only(&ResolveRequest {
+            cwd: tmp.path().to_path_buf(),
+            profile: Some("selected".into()),
+            settings_file: Some(settings_path),
+            binary_overrides: BinaryOverrides {
+                srun: Some("/cli/srun".into()),
+                ..BinaryOverrides::default()
+            },
+            ..ResolveRequest::default()
+        })
+        .expect("resolve binaries");
+
+        assert_eq!(binaries.srun.value, "/cli/srun");
+        assert_eq!(binaries.srun.source, ValueSource::Cli);
+        assert_eq!(binaries.squeue.value, "/profile/squeue");
+        assert_eq!(binaries.squeue.source, ValueSource::Profile);
+        assert_eq!(binaries.sacct.value, "/defaults/sacct");
+        assert_eq!(binaries.sacct.source, ValueSource::Defaults);
+        assert_eq!(binaries.sstat.value, DEFAULT_SSTAT_BIN);
+        assert_eq!(binaries.sstat.source, ValueSource::Builtin);
+    }
+
+    #[test]
+    fn resolve_binaries_only_does_not_read_compose_env_or_secret_inputs() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let settings_path = tmp.path().join("settings.toml");
+        let compose_path = tmp.path().join("compose.yaml");
+        let mut settings = Settings::default();
+        settings.defaults.compose_file = Some("compose.yaml".into());
+        settings.defaults.env_files = vec!["missing.env".into()];
+        settings.defaults.binaries.sbatch = Some("/defaults/sbatch".into());
+        write_settings(&settings_path, &settings).expect("settings");
+        fs::write(
+            &compose_path,
+            "secrets:\n  TOKEN:\n    file: missing-secret.txt\nservices:\n  app:\n    image: redis:7\n",
+        )
+        .expect("compose");
+
+        let request = ResolveRequest {
+            cwd: tmp.path().to_path_buf(),
+            settings_file: Some(settings_path.clone()),
+            ..ResolveRequest::default()
+        };
+        let binaries =
+            resolve_binaries_only(&request).expect("ignore missing env and secret files");
+        assert_eq!(binaries.sbatch.value, "/defaults/sbatch");
+        assert_eq!(binaries.sbatch.source, ValueSource::Defaults);
+
+        fs::remove_file(compose_path).expect("remove compose");
+        let binaries = resolve_binaries_only(&ResolveRequest {
+            compose_file_override: Some(PathBuf::from("also-missing.yaml")),
+            ..request
+        })
+        .expect("ignore missing compose file");
+        assert_eq!(binaries.sbatch.value, "/defaults/sbatch");
+        assert_eq!(binaries.sbatch.source, ValueSource::Defaults);
     }
 
     #[test]
