@@ -17,10 +17,12 @@ use super::analytics::{
 use super::metadata_io::read_json;
 use super::model::{SubmissionBackend, SubmissionRecord};
 use super::rightsize::{RightsizeConfidence, RightsizeRecommendation, build_rightsize_report};
+use super::sampler_protocol::{
+    GpuDeviceSampleRow, GpuProcessSampleRow, SamplerMetaFile, SlurmSampleRow,
+};
 use super::scheduler::{build_status_snapshot, parse_scheduler_timestamp, scheduler_source_label};
 use super::stats::{
-    CollectorCoverage, CollectorCoverageSummary, CollectorStatus, GpuDeviceSampleRow,
-    GpuProcessSampleRow, SamplerMetaFile, SchedulerOptions, SlurmSampleRow, StepStats,
+    CollectorCoverage, CollectorCoverageSummary, CollectorStatus, SchedulerOptions, StepStats,
     collector_coverage_summaries, effective_collector_coverage, metrics_dir_for_record,
     probe_step_stats, step_from_slurm_sample_row,
 };

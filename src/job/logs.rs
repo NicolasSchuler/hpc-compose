@@ -2,6 +2,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
@@ -9,7 +10,6 @@ use regex::Regex;
 use crate::term;
 use crate::time_util::{system_time_to_unix, unix_timestamp_now};
 
-use super::POLL_INTERVAL;
 use super::model::{SchedulerSource, SubmissionBackend, SubmissionRecord};
 use super::scheduler::{
     JobState, QueueDiagnostics, SchedulerStatus, build_status_snapshot, format_walltime_duration,
@@ -18,6 +18,8 @@ use super::scheduler::{
     scheduler_source_label, walltime_progress, walltime_progress_percent,
 };
 use super::stats::SchedulerOptions;
+
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Final outcome returned by `watch_submission`.
 #[derive(Debug, Clone, PartialEq, Eq)]

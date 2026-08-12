@@ -19,11 +19,16 @@ use super::record::{
     load_submission_record, load_submission_record_optional, runtime_job_root_for_record,
 };
 use super::runtime_state::{ServiceRuntimeStateFile, load_runtime_state};
+use super::sampler_protocol::{
+    CpuSampleRow, GpuDeviceSampleRow, GpuProcessSampleRow, SamplerMetaFile, SlurmSampleRow,
+};
 use super::scheduler::{
-    SchedulerCommandError, SchedulerCommandUnavailable, SchedulerStatus,
-    build_local_scheduler_status, command_unavailable_detail, command_unavailable_error,
-    probe_scheduler_status, reconcile_scheduler_status, run_scheduler_command,
-    stats_unavailable_reason,
+    SchedulerStatus, build_local_scheduler_status, probe_scheduler_status,
+    reconcile_scheduler_status, stats_unavailable_reason,
+};
+use super::scheduler_command::{
+    SchedulerCommandError, SchedulerCommandUnavailable, command_unavailable_detail,
+    command_unavailable_error, run_scheduler_command,
 };
 use super::watchdog::WatchdogSnapshot;
 
@@ -345,12 +350,6 @@ impl Default for StatsOptions {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct SamplerMetaFile {
-    pub(super) interval_seconds: u64,
-    pub(super) collectors: Vec<CollectorStatus>,
-}
-
 pub(crate) fn effective_collector_coverage(
     collectors: &[CollectorStatus],
     collector: &str,
@@ -416,61 +415,6 @@ pub fn telemetry_coverage_warnings(summaries: &[CollectorCoverageSummary]) -> Ve
         .iter()
         .filter_map(|summary| summary.coverage.warning(&summary.collector))
         .collect()
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct GpuDeviceSampleRow {
-    pub(super) sampled_at: String,
-    #[serde(default)]
-    pub(super) node: Option<String>,
-    #[serde(default)]
-    pub(super) rank: Option<String>,
-    #[serde(default)]
-    pub(super) local_rank: Option<String>,
-    #[serde(default)]
-    pub(super) service: Option<String>,
-    #[serde(default)]
-    pub(super) collector: Option<String>,
-    pub(super) index: Option<String>,
-    pub(super) uuid: Option<String>,
-    pub(super) name: Option<String>,
-    pub(super) utilization_gpu: Option<String>,
-    pub(super) utilization_memory: Option<String>,
-    pub(super) memory_used_mib: Option<String>,
-    pub(super) memory_total_mib: Option<String>,
-    pub(super) temperature_c: Option<String>,
-    pub(super) power_draw_w: Option<String>,
-    pub(super) power_limit_w: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct GpuProcessSampleRow {
-    pub(super) sampled_at: String,
-    #[serde(default)]
-    pub(super) node: Option<String>,
-    #[serde(default)]
-    pub(super) rank: Option<String>,
-    #[serde(default)]
-    pub(super) local_rank: Option<String>,
-    #[serde(default)]
-    pub(super) service: Option<String>,
-    #[serde(default)]
-    pub(super) collector: Option<String>,
-    pub(super) gpu_uuid: Option<String>,
-    pub(super) pid: Option<String>,
-    pub(super) process_name: Option<String>,
-    pub(super) used_memory_mib: Option<String>,
-    /// Raw `/proc/<pid>/cgroup` content captured live by the sampler with
-    /// newlines condensed to `;`. Parsed here (not in the job) so the cgroup
-    /// v1/v2 layouts stay unit-testable against fixtures.
-    #[serde(default)]
-    pub(super) cgroup: Option<String>,
-    /// `SLURM_PROCID` read live from `/proc/<pid>/environ`, if readable.
-    #[serde(default)]
-    pub(super) slurm_procid: Option<String>,
-    /// `SLURM_LOCALID` read live from `/proc/<pid>/environ`, if readable.
-    #[serde(default)]
-    pub(super) slurm_localid: Option<String>,
 }
 
 /// One `steps.jsonl` row: the live Slurm step-id -> step-name mapping the
@@ -611,30 +555,6 @@ fn load_step_map(path: &Path) -> BTreeMap<String, String> {
         }
     }
     map
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct CpuSampleRow {
-    #[serde(default)]
-    pub(super) node: Option<String>,
-    #[serde(default)]
-    pub(super) cpu_util_pct: Option<f64>,
-    #[serde(default)]
-    pub(super) core_count: Option<u64>,
-    #[serde(default)]
-    pub(super) loadavg_1m: Option<f64>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct SlurmSampleRow {
-    pub(super) sampled_at: String,
-    pub(super) step_id: Option<String>,
-    pub(super) ntasks: Option<String>,
-    pub(super) ave_cpu: Option<String>,
-    pub(super) ave_rss: Option<String>,
-    pub(super) max_rss: Option<String>,
-    pub(super) alloc_tres: Option<String>,
-    pub(super) tres_usage_in_ave: Option<String>,
 }
 
 #[derive(Debug, Default)]

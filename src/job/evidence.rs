@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize, de};
@@ -816,10 +816,7 @@ fn validate_run_id(run_id: &str) -> Result<()> {
 }
 
 fn generate_run_id(compose_file: &Path, scheduler_job_id: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let nanos = crate::time_util::unix_timestamp_nanos();
     let counter = RUN_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut hasher = Sha256::new();
     hasher.update(nanos.to_le_bytes());

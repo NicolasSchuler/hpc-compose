@@ -1,15 +1,11 @@
 use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::time::Duration;
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::process_probe::{self, ProbeError, ProbeOptions};
 use crate::time_util::{system_time_to_unix, unix_timestamp_now};
 
 use super::model::{SchedulerSource, SubmissionBackend, SubmissionRecord};
@@ -18,108 +14,13 @@ use super::runtime_state::{
     ServiceRuntimeAssertionState, ServiceRuntimeStateEntry, ServiceRuntimeStateFile,
     active_restart_failures_in_window, load_runtime_state, runtime_state_by_service,
 };
+use super::scheduler_command::{SchedulerCommandError, run_scheduler_command};
 use super::stats::{CollectorCoverageSummary, SchedulerOptions};
 use super::verify::StatusVerificationReport;
 use super::watchdog::WatchdogSnapshot;
-use super::{ACCOUNTING_GAP_GRACE_SECONDS, INITIAL_SCHEDULER_LOOKUP_GRACE_SECONDS};
 
-const DEFAULT_SCHEDULER_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
-const SCHEDULER_COMMAND_TIMEOUT_ENV: &str = "HPC_COMPOSE_SCHEDULER_COMMAND_TIMEOUT_MS";
-
-#[derive(Debug)]
-pub(crate) struct SchedulerCommandUnavailable {
-    detail: String,
-}
-
-impl SchedulerCommandUnavailable {
-    fn new(detail: String) -> Self {
-        Self { detail }
-    }
-
-    pub(crate) fn detail(&self) -> &str {
-        &self.detail
-    }
-}
-
-impl fmt::Display for SchedulerCommandUnavailable {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.detail)
-    }
-}
-
-impl Error for SchedulerCommandUnavailable {}
-
-#[derive(Debug)]
-pub(super) enum SchedulerCommandError {
-    Unavailable(SchedulerCommandUnavailable),
-    Io(std::io::Error),
-}
-
-impl SchedulerCommandError {
-    fn unavailable_detail(self) -> Option<String> {
-        match self {
-            Self::Unavailable(err) => Some(err.detail().to_string()),
-            Self::Io(_) => None,
-        }
-    }
-
-    pub(super) fn into_anyhow(self) -> anyhow::Error {
-        match self {
-            Self::Unavailable(err) => err.into(),
-            Self::Io(err) => err.into(),
-        }
-    }
-}
-
-fn scheduler_command_timeout() -> Duration {
-    std::env::var(SCHEDULER_COMMAND_TIMEOUT_ENV)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|millis| *millis > 0)
-        .map(Duration::from_millis)
-        .unwrap_or(DEFAULT_SCHEDULER_COMMAND_TIMEOUT)
-}
-
-pub(super) fn run_scheduler_command(
-    command: &mut Command,
-    command_name: &str,
-    binary: &str,
-) -> std::result::Result<Output, SchedulerCommandError> {
-    run_scheduler_command_with_timeout(command, command_name, binary, scheduler_command_timeout())
-}
-
-fn run_scheduler_command_with_timeout(
-    command: &mut Command,
-    command_name: &str,
-    _binary: &str,
-    timeout: Duration,
-) -> std::result::Result<Output, SchedulerCommandError> {
-    let output = process_probe::run(
-        command,
-        command_name,
-        ProbeOptions {
-            timeout,
-            ..ProbeOptions::default()
-        },
-    )
-    .map_err(|err| match err {
-        ProbeError::Unavailable { .. } | ProbeError::TimedOut { .. } => {
-            SchedulerCommandError::Unavailable(SchedulerCommandUnavailable::new(err.detail()))
-        }
-        err @ ProbeError::OutputLimitExceeded { .. } => SchedulerCommandError::Io(
-            std::io::Error::new(std::io::ErrorKind::InvalidData, err.detail()),
-        ),
-        err @ ProbeError::PostSpawnIo { .. } => {
-            SchedulerCommandError::Io(std::io::Error::other(err.detail()))
-        }
-        ProbeError::Io(err) => SchedulerCommandError::Io(err),
-    })?;
-    Ok(Output {
-        status: output.status,
-        stdout: output.stdout,
-        stderr: output.stderr,
-    })
-}
+const INITIAL_SCHEDULER_LOOKUP_GRACE_SECONDS: u64 = 15;
+const ACCOUNTING_GAP_GRACE_SECONDS: u64 = 15;
 
 /// Live walltime progress derived from a tracked job record and scheduler diagnostics.
 #[allow(missing_docs)]
@@ -1011,18 +912,6 @@ fn array_task_key(row: &ArrayTaskStatus) -> String {
         Some(task_id) => format!("task:{task_id:010}"),
         None => format!("raw:{}", row.job_id_raw),
     }
-}
-
-pub(crate) fn command_unavailable_error(err: &std::io::Error) -> bool {
-    process_probe::command_unavailable_error(err)
-}
-
-pub(crate) fn command_unavailable_detail(
-    command_name: &str,
-    binary: &str,
-    err: &std::io::Error,
-) -> String {
-    process_probe::command_unavailable_detail(command_name, binary, err)
 }
 
 fn command_failure_detail(stdout: &[u8], stderr: &[u8]) -> String {
@@ -2002,58 +1891,6 @@ done
             diagnostics.start_time.as_deref(),
             Some("2026-04-10T12:00:00")
         );
-    }
-
-    #[cfg(unix)]
-    #[cfg(unix)]
-    #[test]
-    fn scheduler_command_reads_full_output() {
-        // Regression guard for the pipe-read refactor: a successful command's stdout
-        // must be captured in full. A genuine `read_to_end` error can't be forced
-        // deterministically via the fake-binary fixtures (a closed pipe yields EOF,
-        // i.e. `Ok(0)`, not an error), so we assert the happy path stays intact and
-        // rely on the type system to route any real read error into `Io`.
-        let tmpdir = tempfile::tempdir().expect("tmpdir");
-        let printer = write_fake_probe(tmpdir.path(), "printy-squeue", "JOBID STATE\n42 RUNNING");
-        let binary = printer.to_string_lossy().to_string();
-        let mut command = Command::new(&printer);
-
-        let output = run_scheduler_command_with_timeout(
-            &mut command,
-            "squeue",
-            &binary,
-            Duration::from_secs(5),
-        )
-        .expect("fake command should succeed");
-
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("JOBID STATE"));
-        assert!(stdout.contains("42 RUNNING"));
-    }
-
-    #[test]
-    fn scheduler_command_timeout_reports_unavailable() {
-        let tmpdir = tempfile::tempdir().expect("tmpdir");
-        let sleeper = write_fake_script(tmpdir.path(), "sleepy-squeue", "#!/bin/sh\nsleep 5\n");
-        let binary = sleeper.to_string_lossy().to_string();
-        let mut command = Command::new(&sleeper);
-
-        let err = run_scheduler_command_with_timeout(
-            &mut command,
-            "squeue",
-            &binary,
-            Duration::from_millis(50),
-        )
-        .expect_err("sleeping command should time out");
-
-        match err {
-            SchedulerCommandError::Unavailable(err) => {
-                assert!(err.detail().contains("squeue timed out"));
-                assert!(err.detail().contains(&binary));
-            }
-            SchedulerCommandError::Io(err) => panic!("expected timeout detail, got {err}"),
-        }
     }
 
     #[test]

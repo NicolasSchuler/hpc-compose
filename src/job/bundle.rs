@@ -16,6 +16,9 @@ use flate2::write::GzEncoder;
 use serde::{Deserialize, Serialize};
 use tar::Builder;
 
+use crate::path_util::absolute_path_cwd;
+
+use super::ARTIFACT_MANIFEST_SCHEMA_VERSION;
 use super::artifacts::{
     ArtifactManifest, artifact_manifest_path_for_record, artifact_payload_dir_for_record,
     copy_path_recursive_within, resolve_selected_bundles, validate_manifest_relative_path,
@@ -24,7 +27,6 @@ use super::artifacts::{
 use super::checkpoints::CheckpointHistory;
 use super::file_digest::sha256_file;
 use super::model::SubmissionRecord;
-use super::{ARTIFACT_MANIFEST_SCHEMA_VERSION, absolute_path};
 
 const EXPERIMENT_BUNDLE_SCHEMA_VERSION: u32 = 1;
 
@@ -97,7 +99,7 @@ pub fn write_experiment_bundle<T: Serialize>(
     checkpoint_history: &CheckpointHistory,
     options: &ExperimentBundleOptions,
 ) -> Result<ExperimentBundleManifest> {
-    let into_dir = absolute_path(&options.into_dir)?;
+    let into_dir = absolute_path_cwd(&options.into_dir)?;
     fs::create_dir_all(&into_dir).context(format!("failed to create {}", into_dir.display()))?;
 
     let dir_name = bundle_dir_name(&record.job_id)?;
@@ -224,10 +226,7 @@ struct StagingBundleDir {
 impl StagingBundleDir {
     fn create(into_dir: &Path, dir_name: &str) -> Result<Self> {
         for attempt in 0..100_u32 {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0);
+            let nanos = crate::time_util::unix_timestamp_nanos();
             let path = into_dir.join(format!(
                 ".{dir_name}.{}.{}.{}.tmp",
                 std::process::id(),

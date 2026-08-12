@@ -10,11 +10,14 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::path_util::absolute_path_cwd;
 use crate::runtime_plan::RuntimePlan;
 use crate::time_util::{SECONDS_PER_DAY, unix_timestamp_now};
 use crate::tracked_paths;
 
+use super::SUBMISSION_SCHEMA_VERSION;
 use super::annotation_policy;
+use super::batch_log::batch_log_path_for_backend;
 use super::deep_clean::DeepCleanupDetails;
 use super::metadata_io::{read_json, read_json_optional, write_json};
 use super::model::{
@@ -22,7 +25,6 @@ use super::model::{
     SubmissionRecordBuildOptions, SweepTrialMetadata,
 };
 use super::provenance::JobProvenance;
-use super::{SUBMISSION_SCHEMA_VERSION, absolute_path, batch_log_path_for_backend};
 
 /// One tracked job discovered from recorded submission metadata.
 #[allow(missing_docs)]
@@ -231,9 +233,9 @@ pub fn build_submission_record_with_backend_and_options(
     backend: SubmissionBackend,
     options: &SubmissionRecordBuildOptions,
 ) -> Result<SubmissionRecord> {
-    let compose_file = absolute_path(spec_path)?;
-    let submit_dir = absolute_path(submit_dir)?;
-    let script_path = absolute_path(script_path)?;
+    let compose_file = absolute_path_cwd(spec_path)?;
+    let submit_dir = absolute_path_cwd(submit_dir)?;
+    let script_path = absolute_path_cwd(script_path)?;
     // Persist only an explicit `x-slurm.runtime_root` override (resolved
     // absolute); `None` means the default `<submit_dir>/.hpc-compose` layout,
     // which `runtime_job_root_for_record` reconstructs from `submit_dir`.
@@ -493,7 +495,7 @@ pub fn update_submission_record(
     job_id: &str,
     mutate: impl FnOnce(&mut SubmissionRecord) -> Result<()>,
 ) -> Result<SubmissionRecord> {
-    let compose_file = absolute_path(spec_path)?;
+    let compose_file = absolute_path_cwd(spec_path)?;
     let record_path = checked_record_path_for_job_id(&compose_file, job_id)?;
     if !managed_record_directories_exist(&compose_file)? {
         bail!(
@@ -656,7 +658,7 @@ pub fn remove_submission_record(record: &SubmissionRecord) -> Result<()> {
 
 /// Loads every tracked job record for the given compose file.
 pub fn scan_job_records(spec_path: &Path) -> Result<Vec<SubmissionRecord>> {
-    let compose_file = absolute_path(spec_path)?;
+    let compose_file = absolute_path_cwd(spec_path)?;
     Ok(
         scan_job_records_with_paths(&metadata_root_for(&compose_file))?
             .into_iter()
@@ -741,7 +743,7 @@ pub fn build_cleanup_report(
     include_disk_usage: bool,
     dry_run: bool,
 ) -> Result<CleanupReport> {
-    let compose_file = absolute_path(spec_path)?;
+    let compose_file = absolute_path_cwd(spec_path)?;
     let metadata_root = metadata_root_for(&compose_file);
     let now = unix_timestamp_now();
     let latest_pointer_job_id_before =
@@ -897,7 +899,7 @@ pub fn run_cleanup_report(report: &CleanupReport) -> Result<()> {
 
 /// Loads one tracked submission record, defaulting to the latest job.
 pub fn load_submission_record(spec_path: &Path, job_id: Option<&str>) -> Result<SubmissionRecord> {
-    let compose_file = absolute_path(spec_path)?;
+    let compose_file = absolute_path_cwd(spec_path)?;
     let _ = managed_record_directories_exist(&compose_file)?;
     let path = match job_id {
         Some(job_id) => checked_record_path_for_job_id(&compose_file, job_id)?,
@@ -936,7 +938,7 @@ pub fn load_submission_record_optional(
     spec_path: &Path,
     job_id: Option<&str>,
 ) -> Option<SubmissionRecord> {
-    let compose_file = absolute_path(spec_path).ok()?;
+    let compose_file = absolute_path_cwd(spec_path).ok()?;
     if let Err(error) = managed_record_directories_exist(&compose_file) {
         crate::diagnostics::warn_with_code(
             "corrupt_submission_record",

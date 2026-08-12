@@ -8,7 +8,7 @@ use crate::memory::parse_memory_bytes;
 
 use super::analytics::{parse_tres_map, parse_u64, tres_gpu_count, tres_memory_bytes};
 use super::model::{SubmissionBackend, SubmissionRecord};
-use super::scheduler::{SchedulerCommandError, run_scheduler_command};
+use super::scheduler_command::{SchedulerCommandError, run_scheduler_command};
 
 /// Slurm accounting data returned by `stats --accounting`.
 #[allow(missing_docs)]

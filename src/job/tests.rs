@@ -1,17 +1,21 @@
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
+use super::batch_log::{
+    batch_log_glob_for_backend, batch_log_path_for, expand_slurm_filename_pattern,
+};
 use super::logs::LogCursor;
 use super::metadata_io::{read_json, write_json};
 use super::runtime_state::{ServiceRuntimeStateFile, load_runtime_state};
+use super::sampler_protocol::SlurmSampleRow;
 use super::scheduler::{
     build_batch_log_status, is_terminal_state, is_transitional_local_only,
     reconcile_scheduler_status, stats_unavailable_reason,
 };
-use super::stats::SlurmSampleRow;
 use super::*;
 use crate::planner::{ExecutionSpec, ImageSource, ServicePlacement};
-use crate::runtime_plan::RuntimeService;
+use crate::runtime_plan::{RuntimePlan, RuntimeService};
 use crate::spec::{ServiceFailurePolicy, ServiceSlurmConfig, SlurmConfig};
 use crate::time_util::unix_timestamp_now;
 
@@ -294,7 +298,6 @@ fn defaults_and_path_helpers_cover_remaining_helpers() {
         log_dir_for_record(&fallback_record),
         tmpdir.path().join(".hpc-compose/999/logs")
     );
-    let _ = current_user_name();
 }
 
 #[test]
@@ -804,6 +807,35 @@ fn batch_log_path_uses_default_and_slurm_output() {
     assert_eq!(
         expand_slurm_filename_pattern("logs/%x-%j-%t-%N.out", "77", "demo", None, false),
         "logs/demo-77-%t-%N.out"
+    );
+}
+
+#[test]
+fn batch_log_pattern_expansion_preserves_slurm_literals_and_width_rules() {
+    assert_eq!(
+        expand_slurm_filename_pattern("logs/%A-%12j-%q-%2q-%4", "77", "demo", Some("alice"), false,),
+        "logs/77-0000000077-%q-%2q-%4"
+    );
+    assert_eq!(
+        expand_slurm_filename_pattern("logs/%t-%N-%n-%s-%a.out", "77", "demo", None, true,),
+        "logs/*-*-*-*-*.out"
+    );
+    assert_eq!(
+        expand_slurm_filename_pattern("logs/%t-%N-%n-%s-%a.out", "77", "demo", None, false,),
+        "logs/%t-%N-%n-%s-%a.out"
+    );
+
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let mut plan = runtime_plan(tmpdir.path());
+    let absolute_pattern = if cfg!(windows) {
+        r"C:\shared\logs\%A.out"
+    } else {
+        "/shared/logs/%A.out"
+    };
+    plan.slurm.output = Some(absolute_pattern.into());
+    assert_eq!(
+        batch_log_path_for(&plan, tmpdir.path(), "77"),
+        PathBuf::from(absolute_pattern.replace("%A", "77"))
     );
 }
 

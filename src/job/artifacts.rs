@@ -165,10 +165,7 @@ impl ArtifactExportTransaction {
         let mut last_collision = None;
         for _ in 0..16 {
             let counter = ARTIFACT_EXPORT_TRANSACTION_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or_default();
+            let nanos = crate::time_util::unix_timestamp_nanos();
             let root = export_dir.join(format!(
                 ".hpc-compose-export-transaction-{}-{nanos}-{counter}",
                 std::process::id()

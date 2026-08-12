@@ -9,10 +9,10 @@ use std::time::UNIX_EPOCH;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use crate::path_util::absolute_path_cwd;
 use crate::time_util::{SECONDS_PER_DAY, unix_timestamp_now};
 use crate::tracked_paths;
 
-use super::absolute_path;
 use super::record::{self, CleanupMode, CleanupReport, build_cleanup_report, run_cleanup_report};
 
 /// Extra cleanup details included by `clean --deep`.
@@ -181,7 +181,7 @@ fn protected_runtime_job_ids(
     cache_dir: &Path,
     include_disk_usage: bool,
 ) -> Result<BTreeSet<String>> {
-    let compose_file = absolute_path(spec_path)?;
+    let compose_file = absolute_path_cwd(spec_path)?;
     let scan_root =
         crate::path_util::repo_root_or_cwd(compose_file.parent().unwrap_or_else(|| Path::new(".")));
     let mut protected = BTreeSet::new();

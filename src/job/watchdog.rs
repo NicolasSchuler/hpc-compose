@@ -14,11 +14,12 @@ use crate::spec::{
 use super::analytics::{estimated_step_memory_bytes, find_tres_value, parse_f64, parse_u64};
 use super::metadata_io::read_json;
 use super::model::SubmissionRecord;
+use super::sampler_protocol::{GpuDeviceSampleRow, SamplerMetaFile, SlurmSampleRow};
 use super::scheduler::{JobState, SchedulerStatus, parse_scheduler_timestamp};
 use super::stats::{
-    CollectorCoverage, CollectorCoverageSummary, GpuDeviceSampleRow, SamplerMetaFile,
-    SlurmSampleRow, StepStats, collector_coverage_summaries, effective_collector_coverage,
-    expected_nodes_for_record, metrics_dir_for_record, step_from_slurm_sample_row,
+    CollectorCoverage, CollectorCoverageSummary, StepStats, collector_coverage_summaries,
+    effective_collector_coverage, expected_nodes_for_record, metrics_dir_for_record,
+    step_from_slurm_sample_row,
 };
 
 /// Status of the advisory idle-resource watchdog.

@@ -18,12 +18,14 @@ use super::analytics::{estimated_step_memory_bytes, format_bytes_gib, gpu_device
 use super::metadata_io::read_json;
 use super::model::{SubmissionBackend, SubmissionRecord};
 use super::runtime_state::{load_runtime_state, runtime_state_by_service};
+use super::sampler_protocol::{
+    GpuDeviceSampleRow, GpuProcessSampleRow, SamplerMetaFile, SlurmSampleRow,
+};
 use super::scheduler::{build_status_snapshot, scheduler_source_label};
 use super::stats::{
-    CollectorCoverage, CollectorCoverageSummary, CollectorStatus, GpuDeviceSampleRow,
-    GpuProcessSampleRow, SamplerMetaFile, SlurmSampleRow, StepStats, collector_coverage_summaries,
-    effective_collector_coverage, metrics_dir_for_record, probe_step_stats,
-    step_from_slurm_sample_row,
+    CollectorCoverage, CollectorCoverageSummary, CollectorStatus, StepStats,
+    collector_coverage_summaries, effective_collector_coverage, metrics_dir_for_record,
+    probe_step_stats, step_from_slurm_sample_row,
 };
 
 const MEMORY_HEADROOM_PERCENT: f64 = 1.25;

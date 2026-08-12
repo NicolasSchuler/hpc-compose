@@ -6,11 +6,12 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::path_util::absolute_path_cwd;
 use crate::spec::{SweepConfig, SweepMatrix, SweepObjective};
 use crate::time_util::unix_timestamp_millis;
 use crate::tracked_paths;
 
-use super::absolute_path;
+use super::file_digest::sha256_reader;
 use super::metadata_io::{read_json, write_json};
 use super::model::SweepTrialMetadata;
 
@@ -138,9 +139,8 @@ pub fn generate_sweep_id() -> String {
 pub fn compose_file_sha256(path: &Path) -> Result<String> {
     let bytes = fs::read(path)
         .with_context(|| format!("failed to read {} for content hashing", path.display()))?;
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Ok(hex::encode(hasher.finalize()))
+    sha256_reader(bytes.as_slice())
+        .with_context(|| format!("failed to read {} for content hashing", path.display()))
 }
 
 /// Expands an embedded sweep config into deterministic trial variables.
@@ -413,7 +413,7 @@ pub fn write_sweep_manifest(manifest: &SweepManifest) -> Result<()> {
 
 /// Loads one sweep manifest, defaulting to the latest sweep.
 pub fn load_sweep_manifest(spec_path: &Path, sweep_id: Option<&str>) -> Result<SweepManifest> {
-    let compose_file = absolute_path(spec_path)?;
+    let compose_file = absolute_path_cwd(spec_path)?;
     let path = match sweep_id {
         Some(sweep_id) => sweep_manifest_path_for(&compose_file, sweep_id),
         None => latest_sweep_manifest_path_for(&compose_file),
@@ -445,7 +445,7 @@ pub fn load_sweep_manifest(spec_path: &Path, sweep_id: Option<&str>) -> Result<S
 
 /// Scans persisted sweep manifests for one compose file.
 pub fn scan_sweep_manifests(spec_path: &Path) -> Result<Vec<SweepManifest>> {
-    let compose_file = absolute_path(spec_path)?;
+    let compose_file = absolute_path_cwd(spec_path)?;
     let sweeps_dir = tracked_paths::sweeps_dir_for(&compose_file);
     if !sweeps_dir.is_dir() {
         return Ok(Vec::new());
@@ -933,10 +933,39 @@ mod tests {
     }
 
     #[test]
-    fn compose_file_sha256_errors_on_missing_file() {
+    fn compose_file_sha256_matches_digest_for_multi_buffer_input() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("compose.yaml");
+        let bytes = (0..(8192 * 3 + 17))
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        fs::write(&path, &bytes).expect("write");
+        let expected = hex::encode(Sha256::digest(&bytes));
+
+        assert_eq!(compose_file_sha256(&path).expect("hash"), expected);
+    }
+
+    #[test]
+    fn compose_file_sha256_preserves_read_error_context() {
         let dir = tempfile::tempdir().expect("tmpdir");
         let missing = dir.path().join("does-not-exist.yaml");
-        assert!(compose_file_sha256(&missing).is_err());
+        let error = compose_file_sha256(&missing).expect_err("missing file should fail");
+        assert_eq!(
+            error.to_string(),
+            format!("failed to read {} for content hashing", missing.display())
+        );
+
+        let unreadable_as_file = dir.path().join("directory.yaml");
+        fs::create_dir(&unreadable_as_file).expect("create directory");
+        let error =
+            compose_file_sha256(&unreadable_as_file).expect_err("directory read should fail");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "failed to read {} for content hashing",
+                unreadable_as_file.display()
+            )
+        );
     }
 
     #[test]
