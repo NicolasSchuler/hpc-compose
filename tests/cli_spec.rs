@@ -1565,9 +1565,13 @@ fn filesystem_probe_timeout_uses_resolved_settings_scancel_binary() {
     let enroot = write_fake_enroot(tmpdir.path());
     let srun = write_fake_srun(tmpdir.path());
     let sbatch = tmpdir.path().join("sbatch-probe-hang");
+    // Model an accepted job that never publishes result.env. Hung sbatch
+    // process cleanup is covered separately in shared_fs_probe unit tests; an
+    // immediate acceptance keeps this settings/scancel integration test
+    // deterministic under the parallel workspace suite.
     write_script(
         &sbatch,
-        "#!/bin/bash\nset -euo pipefail\necho '4242;test-cluster'\nsleep 30\n",
+        "#!/bin/bash\nset -euo pipefail\necho '4242;test-cluster'\n",
     );
     let scancel_log = tmpdir.path().join("probe-scancel.log");
     let scancel = write_fake_scancel(tmpdir.path(), &scancel_log, true);
