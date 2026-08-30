@@ -7,6 +7,33 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-08-30
+
+### Changed
+
+- Reworked terminal onboarding and help around a safer preview-first workflow:
+  templates are grouped and recover from invalid selections, generated commands
+  preserve the selected file path, and real submission is clearly distinguished
+  from `up --dry-run`.
+- Made watch and replay adapt their layout and available-action help to terminal
+  size, backend, and live-versus-replay mode. Line mode is now explicitly
+  documented for piping, recording, and assistive tools.
+- Refined internal planner, runtime, tracked-job, configuration, diagnostics,
+  command, and output ownership into focused modules, with corresponding
+  contributor architecture documentation and no intended behavior change.
+
+### Fixed
+
+- Restored raw mode, alternate-screen, cursor, mouse, and signal semantics after
+  normal quit, setup failure, panic, SIGINT, SIGTERM, and SIGHUP. Slow scheduler
+  probes now complete before terminal takeover instead of leaving a blank UI.
+- Made `up --dry-run` render-only apart from its requested preview script, without
+  staging provenance into the shared cache, and made JSON bootstrap commands
+  reject interactive or incomplete invocations before prompting or writing.
+- Corrected semantic usage exit codes, quiet validation, closed-pipe completion
+  output, explicit color and locale handling, watch-setting validation, and
+  terminal-cell layout for wide and combining Unicode text.
+
 ## [0.2.3] - 2026-07-17
 
 ### Changed
