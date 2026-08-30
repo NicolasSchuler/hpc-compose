@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{DependencyOutputFormat, OutputFormat, SchemaKind};
@@ -32,10 +32,10 @@ use crate::progress::{PrepareProgress, ProgressReporter};
 pub(crate) fn schema(kind: Option<SchemaKind>, output: Option<String>) -> Result<()> {
     if let Some(command) = output {
         let json = crate::output::contract::output_schema_json(&command).ok_or_else(|| {
-            anyhow::anyhow!(
+            hpc_compose::exit::UsageError::new(format!(
                 "unknown output schema '{command}'; known commands: {}",
                 crate::output::contract::output_schema_commands().join(", ")
-            )
+            ))
         })?;
         let mut stdout = io::stdout();
         stdout
@@ -67,6 +67,7 @@ pub(crate) fn schema(kind: Option<SchemaKind>, output: Option<String>) -> Result
 pub(crate) fn validate(
     context: ResolvedContext,
     strict_env: bool,
+    quiet: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
     let plan = load::load_plan_with_interpolation_vars_cache_default_and_resource_profiles(
@@ -89,10 +90,11 @@ pub(crate) fn validate(
         let missing =
             missing_defaulted_variables(&context.compose_file.value, &context.interpolation_vars)?;
         if !missing.is_empty() {
-            bail!(
+            return Err(hpc_compose::exit::UsageError::new(format!(
                 "strict env validation failed; missing variables consumed default fallbacks: {}",
                 missing.into_iter().collect::<Vec<_>>().join(", ")
-            );
+            ))
+            .into());
         }
     }
     match output_common::resolve_output_format(format) {
@@ -101,9 +103,11 @@ pub(crate) fn validate(
             for warning in &cluster_warnings {
                 hpc_compose::diagnostics::warn(warning);
             }
-            output::print_next_steps(&output::validate_next_commands(Some(
-                &context.compose_file.value,
-            )));
+            if !quiet {
+                output::print_next_steps(&output::validate_next_commands(Some(
+                    &context.compose_file.value,
+                )));
+            }
         }
         OutputFormat::Json => {
             println!(
@@ -138,10 +142,11 @@ pub(crate) fn lint(
         let missing =
             missing_defaulted_variables(&context.compose_file.value, &context.interpolation_vars)?;
         if !missing.is_empty() {
-            bail!(
+            return Err(hpc_compose::exit::UsageError::new(format!(
                 "strict env validation failed; missing variables consumed default fallbacks: {}",
                 missing.into_iter().collect::<Vec<_>>().join(", ")
-            );
+            ))
+            .into());
         }
     }
     let cluster_profile = load_discovered_cluster_profile(&context)?;
@@ -411,10 +416,11 @@ pub(crate) fn plan(
         let missing =
             missing_defaulted_variables(&context.compose_file.value, &context.interpolation_vars)?;
         if !missing.is_empty() {
-            bail!(
+            return Err(hpc_compose::exit::UsageError::new(format!(
                 "strict env validation failed; missing variables consumed default fallbacks: {}",
                 missing.into_iter().collect::<Vec<_>>().join(", ")
-            );
+            ))
+            .into());
         }
     }
 
@@ -444,7 +450,11 @@ pub(crate) fn plan(
     } else {
         None
     };
-    let explanations = build_plan_hints(&runtime_plan, &cluster_warnings);
+    let explanations = build_plan_hints(
+        &runtime_plan,
+        &cluster_warnings,
+        &context.compose_file.value,
+    );
 
     // Every output path must redact resolved secret values, mirroring `inspect`.
     // Only the rendered script (`--show-script`, `script` field) is exempt: it is
@@ -502,7 +512,11 @@ pub(crate) fn plan(
     Ok(())
 }
 
-fn build_plan_hints(runtime_plan: &RuntimePlan, cluster_warnings: &[String]) -> Vec<PlanHint> {
+fn build_plan_hints(
+    runtime_plan: &RuntimePlan,
+    cluster_warnings: &[String],
+    compose_file: &Path,
+) -> Vec<PlanHint> {
     let mut hints = Vec::new();
     for warning in cluster_warnings {
         hints.push(PlanHint {
@@ -565,17 +579,20 @@ fn build_plan_hints(runtime_plan: &RuntimePlan, cluster_warnings: &[String]) -> 
             });
         }
     }
+    let compose_arg = crate::shell_quote::quote_always_with_backslash_apostrophe(
+        &compose_file.display().to_string(),
+    );
     if crate::platform::is_macos() {
         hints.push(PlanHint {
             level: "next",
-            message: "next: inspect with `hpc-compose plan --show-script -f <compose.yaml>`; \
-                run `hpc-compose up` from a Linux Slurm login node (macOS is authoring-only)"
-                .to_string(),
+            message: format!(
+                "inspect with `hpc-compose plan --show-script -f {compose_arg}`; run `hpc-compose up -f {compose_arg}` from a Linux Slurm login node (macOS is authoring-only)"
+            ),
         });
     } else {
         hints.push(PlanHint {
             level: "next",
-            message: "next command: hpc-compose up -f <compose.yaml>".to_string(),
+            message: format!("command: hpc-compose up -f {compose_arg}"),
         });
     }
     hints
@@ -1972,7 +1989,13 @@ services:
         let compose = write_compose(tmpdir.path());
         let resolved_context = context_for(&compose, tmpdir.path());
 
-        validate(resolved_context.clone(), false, Some(OutputFormat::Json)).expect("validate json");
+        validate(
+            resolved_context.clone(),
+            false,
+            false,
+            Some(OutputFormat::Json),
+        )
+        .expect("validate json");
         render(
             resolved_context.clone(),
             None,
@@ -2080,7 +2103,7 @@ services:
         let compose = write_compose(tmpdir.path());
         let resolved_context = context_for(&compose, tmpdir.path());
 
-        validate(resolved_context.clone(), false, None).expect("validate text");
+        validate(resolved_context.clone(), false, false, None).expect("validate text");
         render(
             resolved_context.clone(),
             Some(tmpdir.path().join("rendered-text.sbatch")),
@@ -2119,8 +2142,8 @@ services:
         )
         .expect("strict compose");
         let strict_context = context_for(&strict_compose, tmpdir.path());
-        let strict_err =
-            validate(strict_context, true, Some(OutputFormat::Json)).expect_err("strict env");
+        let strict_err = validate(strict_context, true, false, Some(OutputFormat::Json))
+            .expect_err("strict env");
         assert!(
             strict_err
                 .to_string()

@@ -171,6 +171,23 @@ pub(super) fn init_logging(verbose: u8, debug: bool) {
         .try_init();
 }
 
+pub(super) fn install_miette_handler() {
+    let _ = miette::set_hook(Box::new(|_| {
+        // Resolve presentation when a report is created, after `run_cli` has
+        // applied Clap's authoritative global color value. This matters for
+        // trailing child argv accepted without an explicit `--`: the early
+        // help/error scanner cannot fully parse that command boundary.
+        let color = term::stderr_colors_enabled();
+        let unicode = term::unicode_allowed_raw();
+        Box::new(
+            miette::MietteHandlerOpts::new()
+                .color(color)
+                .unicode(unicode)
+                .build(),
+        )
+    }));
+}
+
 pub(super) fn set_notice_format(format: NoticeFormat) {
     NOTICE_FORMAT.with(|cell| cell.set(format));
 }

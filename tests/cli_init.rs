@@ -331,12 +331,18 @@ fn help_and_template_discovery_surface_guided_workflows() {
     );
     assert_eq!(describe_payload["template"]["category"], "basics");
 
-    let new_non_tty = run_cli(tmpdir.path(), &["new"]);
+    let new_non_tty = run_cli_with_stdin(tmpdir.path(), &["new"], "\n\n\n");
     assert_success(&new_non_tty);
     let new_stdout = stdout_text(&new_non_tty);
     assert!(new_stdout.contains("Cache dir (optional)"));
     let generated = fs::read_to_string(tmpdir.path().join("compose.yaml")).expect("compose");
     assert!(!generated.contains("cache_dir:"));
+
+    let eof_dir = tempfile::tempdir().expect("EOF tmpdir");
+    let eof = run_cli(eof_dir.path(), &["new"]);
+    assert_eq!(eof.status.code(), Some(2));
+    assert!(stderr_text(&eof).contains("interactive input ended"));
+    assert!(!eof_dir.path().join("compose.yaml").exists());
 }
 
 #[test]
@@ -1304,6 +1310,61 @@ fn new_and_setup_commands_support_json_output() {
     assert_eq!(setup["env"]["CACHE_DIR"], "/shared/cache");
     assert_eq!(setup["binaries"]["srun"], "/opt/slurm/bin/srun");
     assert_eq!(setup["cache_dir"], "/shared/setup-cache");
+}
+
+#[test]
+fn json_bootstrap_commands_require_explicit_non_interactive_inputs() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let scaffold_path = tmpdir.path().join("compose.yaml");
+
+    let new_output = run_cli(
+        tmpdir.path(),
+        &[
+            "new",
+            "--output",
+            scaffold_path.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(new_output.status.code(), Some(2));
+    assert!(new_output.stdout.is_empty());
+    assert!(stderr_text(&new_output).contains("--format json requires --template"));
+    assert!(!scaffold_path.exists());
+
+    let settings_path = tmpdir.path().join("settings.toml");
+    let setup_output = run_cli(
+        tmpdir.path(),
+        &[
+            "setup",
+            "--settings-file",
+            settings_path.to_str().expect("path"),
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(setup_output.status.code(), Some(2));
+    assert!(setup_output.stdout.is_empty());
+    assert!(stderr_text(&setup_output).contains("--format json requires --non-interactive"));
+    assert!(!settings_path.exists());
+}
+
+#[test]
+fn setup_eof_is_an_error_and_does_not_write_settings() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let settings_path = tmpdir.path().join("settings.toml");
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "setup",
+            "--settings-file",
+            settings_path.to_str().expect("path"),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr_text(&output).contains("interactive setup input ended"));
+    assert!(!settings_path.exists());
 }
 
 #[test]

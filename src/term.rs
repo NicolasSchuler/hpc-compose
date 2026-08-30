@@ -55,7 +55,7 @@ fn colors_enabled() -> bool {
     colors_enabled_for(OutputStream::Stdout)
 }
 
-fn stderr_colors_enabled() -> bool {
+pub(crate) fn stderr_colors_enabled() -> bool {
     colors_enabled_for(OutputStream::Stderr)
 }
 
@@ -282,9 +282,28 @@ fn unicode_allowed() -> bool {
 }
 
 pub(crate) fn unicode_allowed_raw() -> bool {
-    std::env::var("LANG")
-        .or_else(|_| std::env::var("LC_ALL"))
-        .is_ok_and(|v| v.contains("UTF-8") || v.contains("utf8") || v.contains("utf-8"))
+    unicode_allowed_for_locales(
+        std::env::var("LC_ALL").ok().as_deref(),
+        std::env::var("LC_CTYPE").ok().as_deref(),
+        std::env::var("LANG").ok().as_deref(),
+    )
+}
+
+fn unicode_allowed_for_locales(
+    lc_all: Option<&str>,
+    lc_ctype: Option<&str>,
+    lang: Option<&str>,
+) -> bool {
+    // POSIX locale precedence is LC_ALL, then the category-specific LC_CTYPE,
+    // then LANG. Empty values do not override the next fallback.
+    [lc_all, lc_ctype, lang]
+        .into_iter()
+        .flatten()
+        .find(|value| !value.is_empty())
+        .is_some_and(|value| {
+            let normalized = value.to_ascii_lowercase();
+            normalized.contains("utf-8") || normalized.contains("utf8")
+        })
 }
 
 pub(crate) fn styled_success_raw(text: &str) -> String {
@@ -380,6 +399,31 @@ mod tests {
         auto_detect_color_with_terminal_state(
             stream, false, false, false, term, stdout_tty, stderr_tty,
         )
+    }
+
+    #[test]
+    fn unicode_locale_resolution_honors_posix_precedence() {
+        assert!(!unicode_allowed_for_locales(
+            Some("C"),
+            Some("en_US.UTF-8"),
+            Some("en_US.UTF-8")
+        ));
+        assert!(!unicode_allowed_for_locales(
+            None,
+            Some("C"),
+            Some("en_US.UTF-8")
+        ));
+        assert!(unicode_allowed_for_locales(
+            Some("C.UTF-8"),
+            Some("C"),
+            Some("C")
+        ));
+        assert!(unicode_allowed_for_locales(
+            Some(""),
+            Some(""),
+            Some("en_US.Utf-8")
+        ));
+        assert!(!unicode_allowed_for_locales(None, None, None));
     }
 
     #[test]

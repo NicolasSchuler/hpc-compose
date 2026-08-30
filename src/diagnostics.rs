@@ -192,6 +192,12 @@ pub(crate) fn init_logging(verbose: u8, debug: bool) {
     presentation::init_logging(verbose, debug);
 }
 
+/// Installs the Miette renderer before any CLI error is captured so explicit
+/// color and limited-Unicode policies also govern runtime diagnostics.
+pub(crate) fn install_miette_handler() {
+    presentation::install_miette_handler();
+}
+
 /// Converts a CLI failure into a Miette report while preserving structured
 /// spec diagnostics and assigning a stable code to generic failures.
 pub(crate) fn cli_error_report(error: anyhow::Error) -> miette::Report {

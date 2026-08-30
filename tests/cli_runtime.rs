@@ -9976,6 +9976,36 @@ fn up_dry_run_skips_preflight_prepare_scheduler_tools_and_locks() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
     let cache_root = safe_cache_dir();
     let compose = write_prepare_compose(tmpdir.path(), cache_root.path());
+    let git_init = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(tmpdir.path())
+        .output()
+        .expect("run git init");
+    assert!(git_init.status.success(), "git init failed: {git_init:?}");
+    let git_add = Command::new("git")
+        .args(["add", "."])
+        .current_dir(tmpdir.path())
+        .output()
+        .expect("run git add");
+    assert!(git_add.status.success(), "git add failed: {git_add:?}");
+    let git_commit = Command::new("git")
+        .args([
+            "-c",
+            "user.name=hpc-compose test",
+            "-c",
+            "user.email=hpc-compose@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ])
+        .current_dir(tmpdir.path())
+        .output()
+        .expect("run git commit");
+    assert!(
+        git_commit.status.success(),
+        "git commit failed: {git_commit:?}"
+    );
     let tool_log = tmpdir.path().join("tool-invocations.log");
     let enroot = write_failing_tool(tmpdir.path(), "enroot-fail", &tool_log);
     let srun = write_failing_tool(tmpdir.path(), "srun-fail", &tool_log);
@@ -10024,6 +10054,10 @@ fn up_dry_run_skips_preflight_prepare_scheduler_tools_and_locks() {
     assert!(
         !plan.ordered_services[0].runtime_image.exists(),
         "dry-run must not prepare runtime artifacts"
+    );
+    assert!(
+        !cache_root.path().join("source").exists(),
+        "dry-run must not stage a source-provenance snapshot"
     );
 }
 

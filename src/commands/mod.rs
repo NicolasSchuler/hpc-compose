@@ -235,9 +235,9 @@ fn ensure_offline_allowed(command: &Commands, options: &GlobalCommandOptions) ->
     let Some(reason) = offline_rejection_reason(command) else {
         return Ok(());
     };
-    bail!(
+    usage_error(format!(
         "--offline forbids {reason}; use static authoring commands such as validate, plan, render, inspect, or an explicit dry-run preview"
-    )
+    ))
 }
 
 fn offline_rejection_reason(command: &Commands) -> Option<&'static str> {
@@ -347,7 +347,7 @@ fn run_command_with_options(command: Commands, options: &GlobalCommandOptions) -
             format,
         } => {
             let context = resolve_command_context(options, file, BinaryOverrides::default(), None)?;
-            spec::validate(context, strict_env, format)
+            spec::validate(context, strict_env, options.quiet, format)
         }
         Commands::Lint {
             file,
@@ -2154,7 +2154,9 @@ fn validate_when_job_id(job_id: &str) -> Result<()> {
         valid_decimal(job_id)
     };
     if !valid {
-        bail!("when --after-job must be a Slurm job id like 12345 or array task id like 12345_7");
+        return usage_error(
+            "when --after-job must be a Slurm job id like 12345 or array task id like 12345_7",
+        );
     }
     Ok(())
 }

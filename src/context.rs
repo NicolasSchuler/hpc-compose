@@ -13,6 +13,8 @@ use crate::dotenv::parse_dotenv_lines;
 
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
 const SETTINGS_RELATIVE_PATH: &str = ".hpc-compose/settings.toml";
+const MIN_WATCH_REFRESH_MS: u64 = 100;
+const MIN_WATCH_METRICS_REFRESH_MS: u64 = 500;
 
 const DEFAULT_COMPOSE_FILE: &str = "compose.yaml";
 const DEFAULT_HUGGINGFACE_CLI_BIN: &str = "huggingface-cli";
@@ -351,6 +353,27 @@ fn default_settings_schema_version() -> u32 {
     SETTINGS_SCHEMA_VERSION
 }
 
+fn validate_watch_settings(settings: &WatchSettings) -> Result<()> {
+    if let Some(sort) = settings.sort.as_deref()
+        && !matches!(sort, "spec" | "triage")
+    {
+        bail!("invalid [watch].sort '{sort}'; expected 'spec' or 'triage'");
+    }
+    if let Some(refresh_ms) = settings.refresh_ms
+        && refresh_ms < MIN_WATCH_REFRESH_MS
+    {
+        bail!("invalid [watch].refresh_ms {refresh_ms}; expected at least {MIN_WATCH_REFRESH_MS}");
+    }
+    if let Some(refresh_ms) = settings.metrics_refresh_ms
+        && refresh_ms < MIN_WATCH_METRICS_REFRESH_MS
+    {
+        bail!(
+            "invalid [watch].metrics_refresh_ms {refresh_ms}; expected at least {MIN_WATCH_METRICS_REFRESH_MS}"
+        );
+    }
+    Ok(())
+}
+
 /// Fully resolved binaries.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
@@ -521,8 +544,8 @@ pub fn repo_root_or_cwd(start: &Path) -> PathBuf {
 ///
 /// # Errors
 ///
-/// Returns an error when the file cannot be parsed or has an unsupported
-/// schema version.
+/// Returns an error when the file cannot be parsed, has an unsupported schema
+/// version, or contains invalid watch preferences.
 pub fn load_settings(path: &Path) -> Result<Settings> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read settings file {}", path.display()))?;
@@ -535,6 +558,7 @@ pub fn load_settings(path: &Path) -> Result<Settings> {
             SETTINGS_SCHEMA_VERSION
         );
     }
+    validate_watch_settings(&settings.watch)?;
     Ok(settings)
 }
 
@@ -554,7 +578,8 @@ pub fn load_settings_if_exists(path: &Path) -> Result<Option<Settings>> {
 ///
 /// # Errors
 ///
-/// Returns an error when serialization or file writes fail.
+/// Returns an error when the settings version or watch preferences are invalid,
+/// or when serialization or file writes fail.
 pub fn write_settings(path: &Path, settings: &Settings) -> Result<()> {
     if settings.version != SETTINGS_SCHEMA_VERSION {
         bail!(
@@ -562,6 +587,7 @@ pub fn write_settings(path: &Path, settings: &Settings) -> Result<()> {
             settings.version
         );
     }
+    validate_watch_settings(&settings.watch)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -1487,6 +1513,104 @@ mod tests {
             err.to_string()
                 .contains("unsupported settings schema version")
         );
+    }
+
+    #[test]
+    fn watch_settings_accept_schema_boundaries_on_load_and_write() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let loaded_path = tmp.path().join("loaded.toml");
+        fs::write(
+            &loaded_path,
+            "version = 1\n[watch]\nsort = \"spec\"\nrefresh_ms = 100\nmetrics_refresh_ms = 500\n",
+        )
+        .expect("write boundary settings");
+
+        let loaded = load_settings(&loaded_path).expect("load boundary settings");
+        assert_eq!(loaded.watch.sort.as_deref(), Some("spec"));
+        assert_eq!(loaded.watch.refresh_ms, Some(100));
+        assert_eq!(loaded.watch.metrics_refresh_ms, Some(500));
+
+        let written_path = tmp.path().join("written.toml");
+        let settings = Settings {
+            watch: WatchSettings {
+                sort: Some("triage".into()),
+                refresh_ms: Some(100),
+                metrics_refresh_ms: Some(500),
+                ..WatchSettings::default()
+            },
+            ..Settings::default()
+        };
+        write_settings(&written_path, &settings).expect("write boundary settings");
+        assert_eq!(
+            load_settings(&written_path)
+                .expect("reload boundary settings")
+                .watch,
+            settings.watch
+        );
+    }
+
+    #[test]
+    fn load_settings_rejects_invalid_watch_values() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("settings.toml");
+        for (watch, expected) in [
+            ("sort = \"banana\"", "invalid [watch].sort 'banana'"),
+            ("refresh_ms = 99", "invalid [watch].refresh_ms 99"),
+            (
+                "metrics_refresh_ms = 499",
+                "invalid [watch].metrics_refresh_ms 499",
+            ),
+        ] {
+            fs::write(&path, format!("version = 1\n[watch]\n{watch}\n"))
+                .expect("write invalid settings");
+            let err = load_settings(&path).expect_err("invalid watch settings");
+            assert!(
+                err.to_string().contains(expected),
+                "unexpected error for {watch}: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_settings_rejects_invalid_watch_values_before_writing() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let invalid = [
+            (
+                WatchSettings {
+                    sort: Some("banana".into()),
+                    ..WatchSettings::default()
+                },
+                "invalid [watch].sort 'banana'",
+            ),
+            (
+                WatchSettings {
+                    refresh_ms: Some(99),
+                    ..WatchSettings::default()
+                },
+                "invalid [watch].refresh_ms 99",
+            ),
+            (
+                WatchSettings {
+                    metrics_refresh_ms: Some(499),
+                    ..WatchSettings::default()
+                },
+                "invalid [watch].metrics_refresh_ms 499",
+            ),
+        ];
+
+        for (index, (watch, expected)) in invalid.into_iter().enumerate() {
+            let path = tmp.path().join(format!("invalid-{index}/settings.toml"));
+            let settings = Settings {
+                watch,
+                ..Settings::default()
+            };
+            let err = write_settings(&path, &settings).expect_err("invalid watch settings");
+            assert!(
+                err.to_string().contains(expected),
+                "unexpected write error: {err:#}"
+            );
+            assert!(!path.exists(), "invalid settings should not be written");
+        }
     }
 
     #[cfg(unix)]

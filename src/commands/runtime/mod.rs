@@ -1940,17 +1940,6 @@ pub(crate) fn launch(
         SubmissionBackend::Slurm
     };
     let local_job_id = local.then(generate_local_job_id);
-    let record_options = SubmissionRecordBuildOptions {
-        kind: SubmissionKind::Main,
-        service_name: None,
-        command_override: None,
-        requested_walltime: requested_walltime(&runtime_plan),
-        slurm_array: runtime_plan.slurm.array.clone(),
-        sweep: None,
-        config_snapshot_yaml: Some(effective_config_yaml.clone()),
-        cached_artifacts: tracked_cached_artifacts(&runtime_plan),
-        provenance: collect_submit_provenance(&context.cwd, &runtime_plan),
-    };
 
     if maybe_check_resume_diff(
         &file,
@@ -2125,6 +2114,21 @@ pub(crate) fn launch(
         }
         return Ok(());
     }
+
+    // Provenance snapshots stage source into the shared cache. A dry-run is a
+    // render-only preview, so defer every tracking-only input until after its
+    // early return and keep the preview free of provenance/cache side effects.
+    let record_options = SubmissionRecordBuildOptions {
+        kind: SubmissionKind::Main,
+        service_name: None,
+        command_override: None,
+        requested_walltime: requested_walltime(&runtime_plan),
+        slurm_array: runtime_plan.slurm.array.clone(),
+        sweep: None,
+        config_snapshot_yaml: Some(effective_config_yaml.clone()),
+        cached_artifacts: tracked_cached_artifacts(&runtime_plan),
+        provenance: collect_submit_provenance(&context.cwd, &runtime_plan),
+    };
 
     if local {
         let record = build_submission_record_with_backend_and_options(

@@ -237,7 +237,7 @@ fn workspace_offline_rejection_precedes_context_and_tool_invocation() {
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let output = run_cli(tmpdir.path(), &refs);
 
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert_eq!(
         stderr_text(&output),

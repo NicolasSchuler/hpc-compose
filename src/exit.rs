@@ -15,7 +15,7 @@
 //! | *n*  | a spawned child process's status, propagated    |
 //!
 //! Codes 1-4 are what `hpc-compose` emits for *its own* failures. Direct-execution
-//! commands (`run`, `alloc`, `shell`, `notebook`, `reach`, `exec`) instead exec a
+//! commands (`run`, `alloc`, `shell`, `notebook`, and `reach`) instead execute a
 //! child on the user's behalf; that child's exit status is surfaced verbatim via
 //! [`crate::exit::ExitCodeError`] and may coincide with a reserved code, exactly as `env(1)`,
 //! `timeout(1)`, and shells behave.
@@ -74,8 +74,8 @@ impl ExitCode {
 
 /// An error carrying a specific process exit code to propagate to the caller's
 /// shell. Construct it at a site where a child process exited nonzero and that
-/// status is meaningful to the user (`run`/`alloc`/`shell`/`notebook`/`reach`/
-/// `exec`). It takes precedence over the [`ExitCode`] catalog: a real child
+/// status is meaningful to the user (`run`/`alloc`/`shell`/`notebook`/`reach`).
+/// It takes precedence over the [`ExitCode`] catalog: a real child
 /// status is surfaced verbatim rather than remapped onto a reserved code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[error("command exited with status {0}")]

@@ -43,7 +43,7 @@ Most `1` exits are unexpected failures, but a few commands use it as a deliberat
 
 ### Child process status
 
-Direct-execution commands — `run`, `alloc`, `shell`, `notebook`, `reach`, `exec` — exec a child process on your behalf and propagate its exit status verbatim, so a test runner's `2` stays distinguishable from its `5`. A propagated status can coincide with a reserved code above; that is expected, and matches how `env(1)`, `timeout(1)`, and shells behave. A child that "failed" while reporting `0` is surfaced as `1`, so a failure never exits `0`.
+Direct-execution commands — `run`, `alloc`, `shell`, `notebook`, and `reach` — execute a child process on your behalf and propagate its exit status verbatim, so a test runner's `2` stays distinguishable from its `5`. A propagated status can coincide with a reserved code above; that is expected, and matches how `env(1)`, `timeout(1)`, and shells behave. A child that "failed" while reporting `0` is surfaced as `1`, so a failure never exits `0`.
 
 ## Branch on the code in CI
 

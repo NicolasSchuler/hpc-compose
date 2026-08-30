@@ -2466,14 +2466,15 @@ fn spec_next_commands_preserve_the_checked_compose_file() {
         vec![
             "hpc-compose plan -f '/tmp/hpc compose/demo'\\''spec.yaml'".to_string(),
             "hpc-compose preflight -f '/tmp/hpc compose/demo'\\''spec.yaml'".to_string(),
-            "hpc-compose up -f '/tmp/hpc compose/demo'\\''spec.yaml'".to_string(),
+            "hpc-compose up --dry-run -f '/tmp/hpc compose/demo'\\''spec.yaml'".to_string(),
+            "hpc-compose up -f '/tmp/hpc compose/demo'\\''spec.yaml' # submits one Slurm job and may consume quota".to_string(),
         ]
     );
 
     let ready = ready_to_run_next_commands(Some(file));
     assert_eq!(
         ready,
-        vec!["hpc-compose up -f '/tmp/hpc compose/demo'\\''spec.yaml'".to_string()]
+        vec!["hpc-compose up -f '/tmp/hpc compose/demo'\\''spec.yaml' # submits one Slurm job and may consume quota".to_string()]
     );
 
     assert_eq!(
@@ -2481,7 +2482,8 @@ fn spec_next_commands_preserve_the_checked_compose_file() {
         vec![
             "hpc-compose plan".to_string(),
             "hpc-compose preflight".to_string(),
-            "hpc-compose up".to_string(),
+            "hpc-compose up --dry-run".to_string(),
+            "hpc-compose up # submits one Slurm job and may consume quota".to_string(),
         ]
     );
 }
@@ -2503,12 +2505,13 @@ fn display_shell_quote_and_exact_spec_hints_preserve_conditional_quoting() {
         vec![
             "hpc-compose plan -f '/tmp/team dir/demo'\\''spec.yaml'".to_string(),
             "hpc-compose preflight -f '/tmp/team dir/demo'\\''spec.yaml'".to_string(),
-            "hpc-compose up -f '/tmp/team dir/demo'\\''spec.yaml'".to_string(),
+            "hpc-compose up --dry-run -f '/tmp/team dir/demo'\\''spec.yaml'".to_string(),
+            "hpc-compose up -f '/tmp/team dir/demo'\\''spec.yaml' # submits one Slurm job and may consume quota".to_string(),
         ]
     );
     assert_eq!(
         ready_to_run_next_commands(Some(file)),
-        vec!["hpc-compose up -f '/tmp/team dir/demo'\\''spec.yaml'".to_string()]
+        vec!["hpc-compose up -f '/tmp/team dir/demo'\\''spec.yaml' # submits one Slurm job and may consume quota".to_string()]
     );
 }
 

@@ -12,6 +12,7 @@ use hpc_compose::cli::build_cli_command;
 use hpc_compose::context::{
     BinaryOverrides, Settings, repo_adjacent_settings_path, write_settings,
 };
+use hpc_compose::exit::UsageError;
 use hpc_compose::init::{
     InitAnswers, cache_dir_placeholder as init_cache_dir_placeholder, next_commands,
     prompt_for_init_with_cache_dir_default, render_template_with_optional_cache_dir,
@@ -64,6 +65,12 @@ pub(crate) fn new_command(
             }
         }
         return Ok(());
+    }
+    if matches!(format, Some(OutputFormat::Json)) && template.is_none() {
+        return Err(UsageError::new(
+            "new --format json requires --template when creating a compose file",
+        )
+        .into());
     }
     let prompt_cache_dir = cache_dir.clone();
     let answers = resolve_init_answers(template, name, cache_dir, || {
@@ -157,6 +164,9 @@ pub(crate) fn setup(
     non_interactive: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
+    if matches!(format, Some(OutputFormat::Json)) && !non_interactive {
+        return Err(UsageError::new("setup --format json requires --non-interactive").into());
+    }
     let cwd = std::env::current_dir().context("failed to determine current working directory")?;
     let settings_path = settings_file_override
         .map(|path| crate::path_util::absolute_path(&path, &cwd))
@@ -395,9 +405,12 @@ fn completions_to_writer(shell: Shell, writer: &mut impl Write) -> Result<()> {
         .join()
         .map_err(|_| anyhow::anyhow!("completion generator panicked"))?;
     let output = add_dynamic_completion_hooks(shell, output)?;
-    writer
-        .write_all(&output)
-        .context("failed to write shell completions")?;
+    if let Err(error) = writer.write_all(&output) {
+        if error.kind() == io::ErrorKind::BrokenPipe {
+            return Ok(());
+        }
+        return Err(error).context("failed to write shell completions");
+    }
     Ok(())
 }
 
@@ -820,9 +833,15 @@ fn prompt(
     .ok();
     output.flush().ok();
     let mut line = String::new();
-    input
+    let bytes_read = input
         .read_line(&mut line)
         .context("failed to read interactive input")?;
+    if bytes_read == 0 {
+        return Err(UsageError::new(format!(
+            "interactive setup input ended while reading '{label}'; rerun with --non-interactive and explicit values"
+        ))
+        .into());
+    }
     let trimmed = line.trim();
     if trimmed.is_empty() {
         Ok(default.to_string())
@@ -1317,6 +1336,27 @@ mod tests {
     }
 
     #[test]
+    fn completions_treats_broken_pipe_as_clean_early_completion() {
+        struct BrokenPipeWriter;
+
+        impl std::io::Write for BrokenPipeWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "downstream reader closed",
+                ))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        completions_to_writer(Shell::Zsh, &mut BrokenPipeWriter)
+            .expect("broken pipe is a clean early completion");
+    }
+
+    #[test]
     fn init_command_and_prompt_cover_remaining_paths() {
         let tmpdir = tempfile::tempdir().expect("tmpdir");
         let output_path = tmpdir.path().join("compose.yaml");
@@ -1371,6 +1411,12 @@ mod tests {
                 .expect("explicit prompt"),
             "prod"
         );
+
+        let mut eof_input = Cursor::new([]);
+        let error = prompt(&mut eof_input, &mut captured, "Profile name", "dev")
+            .expect_err("EOF must not accept the default");
+        assert_eq!(hpc_compose::exit::exit_code_for(&error), 2);
+        assert!(error.to_string().contains("rerun with --non-interactive"));
     }
 
     #[test]

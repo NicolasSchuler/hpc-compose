@@ -156,6 +156,55 @@ fn semantic_value_usage_error_exits_2() {
     assert!(stderr_text(&output).contains("--free-nodes must be greater than zero"));
 }
 
+#[test]
+fn manual_semantic_guards_share_the_usage_exit_code() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cases: &[&[&str]] = &[
+        &["--offline", "preflight"],
+        &["when", "--after-job", "not-a-job-id"],
+        &["evolve", "--format", "json"],
+        &["schema", "--output", "definitely-unknown"],
+    ];
+
+    for args in cases {
+        let output = run_cli(tmpdir.path(), args);
+        assert_failure(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "semantic usage guard must exit 2 for {args:?}\nstdout:\n{}\nstderr:\n{}",
+            stdout_text(&output),
+            stderr_text(&output),
+        );
+    }
+}
+
+#[test]
+fn strict_environment_validation_exits_2() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let compose = write_compose(
+        tmpdir.path(),
+        "strict.yaml",
+        r#"services:
+  app:
+    image: redis:7
+    command: ["/bin/sh", "-lc", "echo ${MISSING_FOR_STRICT:-fallback}"]
+"#,
+    );
+    let output = run_cli(
+        tmpdir.path(),
+        &[
+            "validate",
+            "--strict-env",
+            "-f",
+            compose.to_str().expect("path"),
+        ],
+    );
+    assert_failure(&output);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr_text(&output).contains("strict env validation failed"));
+}
+
 /// Clap-level argument relationships also exit 2.
 #[test]
 fn clap_argument_relationship_exits_2() {

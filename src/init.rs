@@ -21,6 +21,14 @@ pub struct Template {
 }
 
 const CACHE_DIR_PLACEHOLDER: &str = "<shared-cache-dir>";
+const TEMPLATE_CATEGORY_ORDER: &[&str] = &[
+    "basics",
+    "interactive",
+    "llm",
+    "training",
+    "distributed",
+    "workflow",
+];
 
 const TEMPLATES: &[Template] = &[
     Template {
@@ -224,13 +232,36 @@ pub fn template_category(template_name: &str) -> &'static str {
     crate::examples::example_category(template_name).unwrap_or("distributed")
 }
 
+fn template_categories_in_display_order() -> Vec<&'static str> {
+    let mut categories = TEMPLATE_CATEGORY_ORDER.to_vec();
+    for template in TEMPLATES {
+        let category = template_category(template.name);
+        if !categories.contains(&category) {
+            categories.push(category);
+        }
+    }
+    categories
+}
+
+fn templates_in_display_order() -> Vec<&'static Template> {
+    let mut ordered = Vec::with_capacity(TEMPLATES.len());
+    for category in template_categories_in_display_order() {
+        ordered.extend(
+            TEMPLATES
+                .iter()
+                .filter(|template| template_category(template.name) == category),
+        );
+    }
+    ordered
+}
+
 /// Prompts on stdin/stdout for template, app name, and cache directory, using
 /// the supplied cache directory as the interactive default when present.
 ///
 /// # Errors
 ///
-/// Returns an error when stdin/stdout interaction fails or the selected
-/// template number is out of range.
+/// Returns an error when stdin/stdout interaction fails or ends before all
+/// answers are provided.
 pub fn prompt_for_init_with_cache_dir_default(
     default_cache_dir: Option<&str>,
 ) -> Result<InitAnswers> {
@@ -245,27 +276,44 @@ pub fn prompt_for_init_with_cache_dir_default(
 ///
 /// Returns an error when the requested template does not exist.
 pub fn resolve_template(name: &str) -> Result<&'static Template> {
-    let normalized = name.trim().trim_end_matches(".yaml");
-    TEMPLATES
+    let normalized = normalized_template_name(name);
+    if let Some(template) = TEMPLATES
         .iter()
         .find(|template| template.name == normalized)
-        .context(format!(
-            "unknown template '{}'; available templates: {}",
-            name,
-            TEMPLATES
-                .iter()
-                .map(|template| template.name)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))
+    {
+        return Ok(template);
+    }
+
+    match nearest_template_name(normalized) {
+        Some(suggestion) => bail!(
+            "unknown template '{}'; did you mean '{suggestion}'? Run `hpc-compose new --list-templates` to see all templates",
+            name
+        ),
+        None => bail!(
+            "unknown template '{}'; run `hpc-compose new --list-templates` to see available templates",
+            name
+        ),
+    }
+}
+
+fn normalized_template_name(name: &str) -> &str {
+    name.trim().trim_end_matches(".yaml")
+}
+
+fn nearest_template_name(name: &str) -> Option<&'static str> {
+    let candidates = TEMPLATES
+        .iter()
+        .map(|template| template.name)
+        .collect::<Vec<_>>();
+    crate::suggest::nearest_default(name, &candidates)
 }
 
 /// Prompts on stdin/stdout for template, app name, and cache directory.
 ///
 /// # Errors
 ///
-/// Returns an error when stdin/stdout interaction fails or the selected
-/// template number is out of range.
+/// Returns an error when stdin/stdout interaction fails or ends before all
+/// answers are provided.
 pub fn prompt_for_init() -> Result<InitAnswers> {
     prompt_for_init_with_cache_dir_default(None)
 }
@@ -276,10 +324,17 @@ fn prompt_for_init_with_io(
     default_cache_dir: Option<&str>,
 ) -> Result<InitAnswers> {
     writeln!(output, "{}", term::styled_bold("Choose a template:")).ok();
-    for (index, template) in TEMPLATES.iter().enumerate() {
+    let ordered_templates = templates_in_display_order();
+    let mut displayed_category = None;
+    for (index, template) in ordered_templates.iter().enumerate() {
+        let category = template_category(template.name);
+        if displayed_category != Some(category) {
+            writeln!(output, "  {}:", term::styled_section_header(category)).ok();
+            displayed_category = Some(category);
+        }
         writeln!(
             output,
-            "  {}. {} - {}",
+            "    {}. {} - {}",
             index + 1,
             term::styled_bold(template.name),
             term::styled_dim(template.description)
@@ -288,14 +343,23 @@ fn prompt_for_init_with_io(
     }
     output.flush().ok();
 
-    let selection = prompt(input, output, "Template number", "1")?;
-    let template_index = selection
-        .parse::<usize>()
-        .ok()
-        .and_then(|value| value.checked_sub(1))
-        .filter(|index| *index < TEMPLATES.len())
-        .context("template selection must be one of the listed numbers")?;
-    let template = &TEMPLATES[template_index];
+    let template = loop {
+        let selection = prompt(input, output, "Template number or name", "1")?;
+        if let Some(template) = template_from_selection(&selection, &ordered_templates) {
+            break template;
+        }
+
+        let guidance = match nearest_template_name(normalized_template_name(&selection)) {
+            Some(suggestion) => format!(
+                "Unknown template '{selection}'. Did you mean '{suggestion}'? Enter a listed number or exact template name."
+            ),
+            None => format!(
+                "Invalid template selection '{selection}'. Enter a listed number or exact template name."
+            ),
+        };
+        writeln!(output, "{} {guidance}", term::styled_warning("warning:")).ok();
+        output.flush().ok();
+    };
 
     let app_name = prompt(input, output, "Application name", template.name)?;
     let cache_dir = match default_cache_dir.filter(|value| !value.trim().is_empty()) {
@@ -308,6 +372,24 @@ fn prompt_for_init_with_io(
         app_name,
         cache_dir,
     })
+}
+
+fn template_from_selection(
+    selection: &str,
+    ordered_templates: &[&'static Template],
+) -> Option<&'static Template> {
+    if let Some(index) = selection
+        .parse::<usize>()
+        .ok()
+        .and_then(|value| value.checked_sub(1))
+    {
+        return ordered_templates.get(index).copied();
+    }
+
+    let normalized = normalized_template_name(selection);
+    TEMPLATES
+        .iter()
+        .find(|template| template.name == normalized)
 }
 
 /// Renders a shipped template with the selected application name and cache directory.
@@ -396,7 +478,7 @@ pub fn write_initialized_template(output: &Path, rendered: &str, force: bool) ->
     let output = crate::path_util::absolute_path_cwd(output)?;
     if output.exists() && !force {
         bail!(
-            "refusing to overwrite {}; pass --force to replace it",
+            "refusing to overwrite {}; choose another --output path, or pass --force only if you intend to replace the existing file",
             output.display()
         );
     }
@@ -411,24 +493,45 @@ pub fn write_initialized_template(output: &Path, rendered: &str, force: bool) ->
 /// Returns the next CLI commands shown after `new` writes a compose file.
 #[must_use]
 pub fn next_commands(output: &Path) -> Vec<String> {
-    let path = output.display().to_string();
+    let path =
+        crate::shell_quote::quote_always_with_backslash_apostrophe(&output.display().to_string());
     if crate::platform::is_macos() {
         // macOS is authoring-only: keep the user on safe static commands and
         // flag that `up` must run on a Linux Slurm login node, matching the
         // README's Safe First Path and the quickstart's validate-first flow.
         vec![
             format!("hpc-compose validate -f {path}"),
-            format!("hpc-compose plan -f {path}"),
+            format!("hpc-compose plan --explain -f {path}"),
             format!("hpc-compose plan --show-script -f {path}"),
-            format!("hpc-compose up -f {path}   # run from a Linux Slurm login node"),
+            format!("hpc-compose up --dry-run -f {path}"),
+            format!(
+                "hpc-compose up -f {path}   # submits one Slurm job and may consume allocation quota; run from a Linux Slurm login node"
+            ),
         ]
     } else {
         vec![
             format!("hpc-compose validate -f {path}"),
-            format!("hpc-compose plan -f {path}"),
-            format!("hpc-compose up -f {path}"),
+            format!("hpc-compose plan --explain -f {path}"),
+            format!("hpc-compose up --dry-run -f {path}"),
+            format!(
+                "hpc-compose up -f {path}   # submits one Slurm job and may consume allocation quota"
+            ),
         ]
     }
+}
+
+fn read_prompt_line(input: &mut impl BufRead, label: &str) -> Result<String> {
+    let mut line = String::new();
+    let bytes_read = input
+        .read_line(&mut line)
+        .context("failed to read interactive input")?;
+    if bytes_read == 0 {
+        return Err(crate::exit::UsageError::new(format!(
+            "interactive input ended while waiting for {label}"
+        ))
+        .into());
+    }
+    Ok(line)
 }
 
 fn prompt(
@@ -445,10 +548,7 @@ fn prompt(
     )
     .ok();
     output.flush().ok();
-    let mut line = String::new();
-    input
-        .read_line(&mut line)
-        .context("failed to read interactive input")?;
+    let line = read_prompt_line(input, label)?;
     let trimmed = line.trim();
     if trimmed.is_empty() {
         Ok(default.to_string())
@@ -466,10 +566,7 @@ fn prompt_required(
 ) -> Result<String> {
     write!(output, "{}: ", term::styled_bold(label)).ok();
     output.flush().ok();
-    let mut line = String::new();
-    input
-        .read_line(&mut line)
-        .context("failed to read interactive input")?;
+    let line = read_prompt_line(input, label)?;
     let trimmed = line.trim();
     if trimmed.is_empty() {
         bail!("{label} cannot be empty; {guidance}");
@@ -484,10 +581,7 @@ fn optional_prompt(
 ) -> Result<Option<String>> {
     write!(output, "{} (optional): ", term::styled_bold(label)).ok();
     output.flush().ok();
-    let mut line = String::new();
-    input
-        .read_line(&mut line)
-        .context("failed to read interactive input")?;
+    let line = read_prompt_line(input, label)?;
     let trimmed = line.trim();
     if trimmed.is_empty() {
         Ok(None)
@@ -503,6 +597,24 @@ mod tests {
     use super::*;
     use crate::spec::ComposeSpec;
 
+    fn strip_ansi(text: &str) -> String {
+        let mut output = String::new();
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next();
+                for code in chars.by_ref() {
+                    if code.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+            output.push(ch);
+        }
+        output
+    }
+
     #[test]
     fn templates_are_resolvable() {
         assert!(!templates().is_empty());
@@ -514,45 +626,88 @@ mod tests {
                 resolve_template(&format!("{}.yaml", template.name)).expect("resolve yaml");
             assert_eq!(resolved.name, template.name);
         }
+
+        let ordered = templates_in_display_order();
+        assert_eq!(ordered.len(), templates().len());
+        let mut ordered_names = ordered
+            .iter()
+            .map(|template| template.name)
+            .collect::<Vec<_>>();
+        ordered_names.sort_unstable();
+        ordered_names.dedup();
+        assert_eq!(ordered_names.len(), templates().len());
+        assert_eq!(ordered[3].name, "restart-policy");
+        assert_eq!(
+            template_from_selection("4", &ordered)
+                .expect("grouped numeric selection")
+                .name,
+            "restart-policy"
+        );
+        assert_eq!(
+            template_from_selection("minimal-batch", &ordered)
+                .expect("name selection")
+                .name,
+            "minimal-batch"
+        );
     }
 
     #[test]
     fn cache_dir_placeholder_and_next_commands_match_expected_defaults() {
         assert_eq!(cache_dir_placeholder(), "<shared-cache-dir>");
         let commands = next_commands(Path::new("/tmp/demo.yaml"));
-        assert_eq!(commands[0], "hpc-compose validate -f /tmp/demo.yaml");
-        assert_eq!(commands[1], "hpc-compose plan -f /tmp/demo.yaml");
+        assert_eq!(commands[0], "hpc-compose validate -f '/tmp/demo.yaml'");
+        assert_eq!(
+            commands[1],
+            "hpc-compose plan --explain -f '/tmp/demo.yaml'"
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|command| command == "hpc-compose up --dry-run -f '/tmp/demo.yaml'")
+        );
+        let real_up = commands.last().expect("real up command");
+        assert!(real_up.contains("submits one Slurm job"));
+        assert!(real_up.contains("may consume allocation quota"));
         if cfg!(target_os = "macos") {
             assert!(
                 commands
                     .iter()
-                    .any(|c| c.contains("plan --show-script -f /tmp/demo.yaml"))
+                    .any(|c| c.contains("plan --show-script -f '/tmp/demo.yaml'"))
             );
-            assert!(
-                commands
-                    .iter()
-                    .any(|c| c.starts_with("hpc-compose up -f /tmp/demo.yaml"))
-            );
+            assert!(real_up.contains("run from a Linux Slurm login node"));
         } else {
             assert_eq!(
                 commands,
                 vec![
-                    "hpc-compose validate -f /tmp/demo.yaml",
-                    "hpc-compose plan -f /tmp/demo.yaml",
-                    "hpc-compose up -f /tmp/demo.yaml",
+                    "hpc-compose validate -f '/tmp/demo.yaml'",
+                    "hpc-compose plan --explain -f '/tmp/demo.yaml'",
+                    "hpc-compose up --dry-run -f '/tmp/demo.yaml'",
+                    "hpc-compose up -f '/tmp/demo.yaml'   # submits one Slurm job and may consume allocation quota",
                 ]
             );
         }
+
+        let quoted_commands = next_commands(Path::new("/tmp/demo's specs/compose file.yaml"));
+        let quoted_path = "'/tmp/demo'\\''s specs/compose file.yaml'";
+        assert!(
+            quoted_commands
+                .iter()
+                .all(|command| command.contains(quoted_path)),
+            "every generated command must shell-quote its path: {quoted_commands:?}"
+        );
     }
 
     #[test]
     fn resolve_template_reports_unknown_name() {
-        let err = resolve_template("missing-template").expect_err("missing");
-        assert!(
-            err.to_string()
-                .contains("unknown template 'missing-template'")
-        );
-        assert!(err.to_string().contains("dev-python-app"));
+        let err = resolve_template("minmal-batch").expect_err("typo");
+        assert!(err.to_string().contains("unknown template 'minmal-batch'"));
+        assert!(err.to_string().contains("did you mean 'minimal-batch'?"));
+        assert!(err.to_string().contains("new --list-templates"));
+        assert!(!err.to_string().contains("dev-python-app"));
+
+        let err = resolve_template("completely-unrelated-workload").expect_err("unrelated");
+        assert!(err.to_string().contains("new --list-templates"));
+        assert!(!err.to_string().contains("did you mean"));
     }
 
     #[test]
@@ -661,6 +816,45 @@ mod tests {
     }
 
     #[test]
+    fn prompt_helpers_report_eof_instead_of_accepting_an_implicit_default() {
+        let mut input = Cursor::new(b"");
+        let mut output = Vec::new();
+        let err =
+            prompt(&mut input, &mut output, "Application name", "demo").expect_err("prompt EOF");
+        assert_eq!(
+            err.to_string(),
+            "interactive input ended while waiting for Application name"
+        );
+
+        let mut input = Cursor::new(b"");
+        let mut output = Vec::new();
+        let err = prompt_required(&mut input, &mut output, "Cache dir", "choose a path")
+            .expect_err("required prompt EOF");
+        assert_eq!(
+            err.to_string(),
+            "interactive input ended while waiting for Cache dir"
+        );
+
+        let mut input = Cursor::new(b"");
+        let mut output = Vec::new();
+        let err =
+            optional_prompt(&mut input, &mut output, "Cache dir").expect_err("optional prompt EOF");
+        assert_eq!(
+            err.to_string(),
+            "interactive input ended while waiting for Cache dir"
+        );
+
+        let mut input = Cursor::new(b"");
+        let mut output = Vec::new();
+        let err = prompt_for_init_with_io(&mut input, &mut output, None)
+            .expect_err("template prompt EOF");
+        assert_eq!(
+            err.to_string(),
+            "interactive input ended while waiting for Template number or name"
+        );
+    }
+
+    #[test]
     fn prompt_required_rejects_blank_values() {
         let mut input = Cursor::new(b"\n");
         let mut output = Vec::new();
@@ -683,11 +877,28 @@ mod tests {
         assert_eq!(answers.template_name, "minimal-batch");
         assert_eq!(answers.app_name, "minimal-batch");
         assert_eq!(answers.cache_dir, None);
-        assert!(
-            String::from_utf8(defaults_output)
-                .expect("utf8")
-                .contains("Choose a template:")
-        );
+        let defaults_transcript = strip_ansi(&String::from_utf8(defaults_output).expect("utf8"));
+        assert!(defaults_transcript.contains("Choose a template:"));
+        assert!(defaults_transcript.contains("basics:"));
+        assert!(defaults_transcript.contains("interactive:"));
+        assert!(defaults_transcript.contains("llm:"));
+        assert!(defaults_transcript.contains("training:"));
+        assert!(defaults_transcript.contains("distributed:"));
+        assert!(defaults_transcript.contains("workflow:"));
+        assert!(defaults_transcript.contains("Template number or name"));
+        let mut previous_heading = 0;
+        for category in TEMPLATE_CATEGORY_ORDER {
+            let heading = format!("{category}:");
+            assert_eq!(defaults_transcript.matches(&heading).count(), 1);
+            let position = defaults_transcript
+                .find(&heading)
+                .expect("category heading");
+            assert!(
+                position >= previous_heading,
+                "category order for {category}"
+            );
+            previous_heading = position;
+        }
 
         let mut custom_input = Cursor::new(b"3\ncustom-app\n/custom-cache\n");
         let mut custom_output = Vec::new();
@@ -697,14 +908,30 @@ mod tests {
         assert_eq!(answers.app_name, "custom-app");
         assert_eq!(answers.cache_dir, Some("/custom-cache".to_string()));
 
-        let mut invalid_input = Cursor::new(b"99\n");
+        let mut invalid_input = Cursor::new(b"99\n3\nretry-app\n\n");
         let mut invalid_output = Vec::new();
-        let err = prompt_for_init_with_io(&mut invalid_input, &mut invalid_output, None)
-            .expect_err("invalid");
-        assert!(
-            err.to_string()
-                .contains("template selection must be one of the listed numbers")
-        );
+        let answers = prompt_for_init_with_io(&mut invalid_input, &mut invalid_output, None)
+            .expect("invalid selection should retry");
+        assert_eq!(answers.template_name, "app-redis-worker");
+        assert_eq!(answers.app_name, "retry-app");
+        let invalid_transcript = String::from_utf8(invalid_output).expect("utf8");
+        assert!(invalid_transcript.contains("Invalid template selection '99'"));
+
+        let mut name_input = Cursor::new(b"minmal-batch\nminimal-batch\nname-app\n\n");
+        let mut name_output = Vec::new();
+        let answers = prompt_for_init_with_io(&mut name_input, &mut name_output, None)
+            .expect("name selection should recover from a typo");
+        assert_eq!(answers.template_name, "minimal-batch");
+        assert_eq!(answers.app_name, "name-app");
+        let name_transcript = String::from_utf8(name_output).expect("utf8");
+        assert!(name_transcript.contains("Did you mean 'minimal-batch'?"));
+
+        let mut yaml_name_input = Cursor::new(b"jupyter.yaml\nnotebook-app\n\n");
+        let mut yaml_name_output = Vec::new();
+        let answers = prompt_for_init_with_io(&mut yaml_name_input, &mut yaml_name_output, None)
+            .expect("yaml template name");
+        assert_eq!(answers.template_name, "jupyter");
+        assert_eq!(answers.app_name, "notebook-app");
 
         let mut blank_cache_input = Cursor::new(b"\n\n\n");
         let mut blank_cache_output = Vec::new();
@@ -761,6 +988,11 @@ mod tests {
         let err =
             write_initialized_template(&relative, "name: other\n", false).expect_err("overwrite");
         assert!(err.to_string().contains("refusing to overwrite"));
+        assert!(err.to_string().contains("choose another --output path"));
+        assert!(
+            err.to_string()
+                .contains("--force only if you intend to replace")
+        );
 
         write_initialized_template(&relative, "name: forced\n", true).expect("force overwrite");
         assert_eq!(

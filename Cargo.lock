@@ -165,6 +165,7 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+ "terminal_size",
 ]
 
 [[package]]
@@ -547,6 +548,8 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "unicode-segmentation",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

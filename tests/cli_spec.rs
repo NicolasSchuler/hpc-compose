@@ -64,6 +64,13 @@ fn validate_and_render_commands_work() {
     assert!(validate_stdout.contains(&format!("hpc-compose plan -f '{}'", compose.display())));
     assert!(validate_stdout.contains(&format!("hpc-compose up -f '{}'", compose.display())));
 
+    let quiet_validate = run_cli(
+        tmpdir.path(),
+        &["--quiet", "validate", "-f", compose.to_str().expect("path")],
+    );
+    assert_success(&quiet_validate);
+    assert_eq!(stdout_text(&quiet_validate), "spec is valid\n");
+
     let validate_json = run_cli(
         tmpdir.path(),
         &[
@@ -146,6 +153,25 @@ fn validate_and_render_commands_work() {
     assert!(plan_stdout.contains("spec is valid"));
     assert!(plan_stdout.contains("app"));
     assert!(!default_script.exists());
+
+    let quoted_compose = tmpdir.path().join("compose it's spaced.yaml");
+    fs::copy(&compose, &quoted_compose).expect("copy spaced compose");
+    let explained = run_cli(
+        tmpdir.path(),
+        &[
+            "plan",
+            "--explain",
+            "-f",
+            quoted_compose.to_str().expect("path"),
+        ],
+    );
+    assert_success(&explained);
+    let explained_stdout = stdout_text(&explained);
+    assert!(!explained_stdout.contains("next: next:"));
+    assert!(
+        explained_stdout.contains("compose it'\\''s spaced.yaml'"),
+        "plan hint must contain a shell-safe resolved compose path: {explained_stdout}"
+    );
 
     let plan_tree = run_cli(
         tmpdir.path(),
@@ -2568,7 +2594,7 @@ fn schema_unknown_output_preserves_exact_registry_order_diagnostic() {
         &["schema", "--output", "definitely-not-a-command"],
     );
 
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert_eq!(
         stderr_text(&output),

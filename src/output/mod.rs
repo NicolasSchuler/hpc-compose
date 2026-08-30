@@ -274,14 +274,18 @@ pub(crate) fn validate_next_commands(file: Option<&Path>) -> Vec<String> {
     vec![
         format!("hpc-compose plan{file}"),
         format!("hpc-compose preflight{file}"),
-        format!("hpc-compose up{file}"),
+        format!("hpc-compose up --dry-run{file}"),
+        format!("hpc-compose up{file} # submits one Slurm job and may consume quota"),
     ]
 }
 
 /// Suggested next command once a run is ready to launch — after a clean
 /// `preflight` or a successful `prepare`.
 pub(crate) fn ready_to_run_next_commands(file: Option<&Path>) -> Vec<String> {
-    vec![format!("hpc-compose up{}", file_arg(file))]
+    vec![format!(
+        "hpc-compose up{} # submits one Slurm job and may consume quota",
+        file_arg(file)
+    )]
 }
 
 /// Prints a human-facing "Next:" block of suggested follow-up commands. Text

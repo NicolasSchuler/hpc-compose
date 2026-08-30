@@ -8,7 +8,7 @@ use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc,
 };
 use std::thread::JoinHandle;
@@ -31,12 +31,22 @@ use hpc_compose::job::{
     collector_coverage_summaries, format_walltime_summary, runtime_job_root_for_record, tail_lines,
     telemetry_coverage_warnings, walltime_progress, walltime_progress_percent,
 };
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 const DATA_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_WIDTH: usize = 120;
 const DEFAULT_HEIGHT: usize = 30;
-const MIN_TABLE_WIDTH: usize = 58;
+const MIN_TABLE_WIDTH: usize = 64;
+const MIN_LOG_PANE_WIDTH: usize = 40;
+const MIN_FULL_LAYOUT_HEIGHT: usize = 12;
+const MIN_USABLE_WIDTH: usize = 20;
+// Seven rows are the smallest compact view that can show a title, scheduler
+// state, service context, log context, and a persistent recovery footer. Below
+// that, a dedicated resize/quit view is more honest than partially rendering an
+// interaction whose controls or selected content may be invisible.
+const MIN_USABLE_HEIGHT: usize = 7;
 const FORCE_WATCH_UI_ENV: &str = "HPC_COMPOSE_FORCE_WATCH_UI";
 const DISABLE_WATCH_UI_ENV: &str = "HPC_COMPOSE_DISABLE_WATCH_UI";
 const METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -300,12 +310,17 @@ struct SelectedLogBuffer {
 }
 
 /// Armed while a `TerminalGuard` holds the terminal in raw / alternate-screen
-/// mode. The panic hook, `Drop`, and the SIGTERM/SIGHUP handlers each try to
-/// claim the restore with `swap(false)`; the first to win performs it, so the
-/// terminal is restored exactly once regardless of which path fires. This is a
-/// process-global rather than a per-guard flag because the C signal handler
-/// cannot capture guard state, and watch/replay never nest guards.
+/// mode. The panic hook and `Drop` each try to claim the restore with
+/// `swap(false)`; the first to win performs it, so the terminal is restored
+/// exactly once. Signal handlers do not touch terminal APIs: they only publish
+/// the signal for the normal UI loop to observe, after which `Drop` restores the
+/// terminal and re-raises the signal.
 static TERMINAL_RESTORE_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// First externally delivered terminal signal awaiting normal-flow handling.
+/// Zero means none. A word-sized atomic is safe to update from the signal
+/// handler and avoids terminal IO, allocation, and locking in signal context.
+static PENDING_TERMINAL_SIGNAL: AtomicUsize = AtomicUsize::new(0);
 
 struct TerminalGuard {
     entered_terminal: bool,
@@ -323,6 +338,11 @@ impl TerminalGuard {
         #[cfg(not(test))]
         {
             terminal::enable_raw_mode().context("failed to enable terminal raw mode")?;
+            // Construct the guard immediately after raw mode succeeds. Every
+            // subsequent `?` then drops it transactionally, including failures
+            // while entering the alternate screen, hiding the cursor, enabling
+            // mouse capture, or flushing the entry sequence.
+            let guard = Self::new(true);
             let mut stdout = io::stdout();
             execute!(
                 stdout,
@@ -336,7 +356,7 @@ impl TerminalGuard {
             stdout
                 .flush()
                 .context("failed to flush alternate-screen entry")?;
-            Ok(Self::new(true))
+            Ok(guard)
         }
     }
 
@@ -374,6 +394,9 @@ impl Drop for TerminalGuard {
         if let Some(previous_hook) = self.previous_hook.take() {
             restore_previous_panic_hook(previous_hook);
         }
+        if self.entered_terminal {
+            signal_restore::reraise_pending();
+        }
     }
 }
 
@@ -400,43 +423,37 @@ fn install_terminal_panic_hook(_entered_terminal: bool) -> Option<SharedPanicHoo
     None
 }
 
-/// SIGTERM/SIGHUP handling that restores the terminal before the process dies.
+/// SIGINT/SIGTERM/SIGHUP handling that requests a normal-flow terminal exit.
 ///
-/// An external `kill` or a terminal-close (SIGHUP) takes the default
-/// termination action, so neither `Drop` nor the panic hook runs and the
-/// terminal is left in raw + alternate-screen mode. While a `TerminalGuard`
-/// holds the terminal we install a handler that performs the same best-effort
-/// restore, then resets the disposition to default and re-raises the signal so
-/// the exit status still reflects the signal. `restore_terminal_best_effort`
-/// only writes escape sequences and calls `tcsetattr`, the accepted pattern for
-/// this class of TUI signal handler. libc is used directly (already a direct
-/// dependency, and the mechanism `dev.rs` uses) so no new dependency is added.
+/// The async handler only records the first signal. The UI loop notices it on
+/// its next bounded input tick and returns, `TerminalGuard::drop` performs all
+/// terminal IO in normal Rust flow, and only then is the signal re-raised with
+/// its default disposition so process-status semantics remain intact.
 #[cfg(all(unix, not(test)))]
 mod signal_restore {
-    use super::{Ordering, TERMINAL_RESTORE_ARMED, restore_terminal_best_effort};
+    use super::{Ordering, PENDING_TERMINAL_SIGNAL};
     use std::sync::atomic::AtomicUsize;
 
     // Previous dispositions, restored when the guard drops so normal exit does
     // not leave our handler installed for the next command.
+    static PREV_SIGINT: AtomicUsize = AtomicUsize::new(0);
     static PREV_SIGTERM: AtomicUsize = AtomicUsize::new(0);
     static PREV_SIGHUP: AtomicUsize = AtomicUsize::new(0);
 
     extern "C" fn handle_terminal_signal(signum: libc::c_int) {
-        // Whoever claims the flag owns the single restore; Drop/panic are gated
-        // on the same flag so this cannot double-restore.
-        if TERMINAL_RESTORE_ARMED.swap(false, Ordering::SeqCst) {
-            restore_terminal_best_effort();
-        }
-        // Preserve exit-status semantics: default the disposition and re-raise.
-        unsafe {
-            libc::signal(signum, libc::SIG_DFL);
-            libc::raise(signum);
-        }
+        let _ = PENDING_TERMINAL_SIGNAL.compare_exchange(
+            0,
+            signum as usize,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
     }
 
     pub(super) fn install() {
+        PENDING_TERMINAL_SIGNAL.store(0, Ordering::SeqCst);
         let handler = handle_terminal_signal as *const () as usize;
         unsafe {
+            PREV_SIGINT.store(libc::signal(libc::SIGINT, handler), Ordering::SeqCst);
             PREV_SIGTERM.store(libc::signal(libc::SIGTERM, handler), Ordering::SeqCst);
             PREV_SIGHUP.store(libc::signal(libc::SIGHUP, handler), Ordering::SeqCst);
         }
@@ -444,8 +461,20 @@ mod signal_restore {
 
     pub(super) fn remove() {
         unsafe {
+            libc::signal(libc::SIGINT, PREV_SIGINT.load(Ordering::SeqCst));
             libc::signal(libc::SIGTERM, PREV_SIGTERM.load(Ordering::SeqCst));
             libc::signal(libc::SIGHUP, PREV_SIGHUP.load(Ordering::SeqCst));
+        }
+    }
+
+    pub(super) fn reraise_pending() {
+        let signum = PENDING_TERMINAL_SIGNAL.swap(0, Ordering::SeqCst) as libc::c_int;
+        if signum == 0 {
+            return;
+        }
+        unsafe {
+            libc::signal(signum, libc::SIG_DFL);
+            libc::raise(signum);
         }
     }
 }
@@ -456,6 +485,11 @@ mod signal_restore {
 mod signal_restore {
     pub(super) fn install() {}
     pub(super) fn remove() {}
+    pub(super) fn reraise_pending() {}
+}
+
+fn terminal_signal_pending() -> bool {
+    PENDING_TERMINAL_SIGNAL.load(Ordering::SeqCst) != 0
 }
 
 #[cfg(not(test))]
@@ -541,9 +575,11 @@ impl SelectedLogBuffer {
 }
 
 pub(crate) fn can_use_watch_ui() -> bool {
+    let term = std::env::var("TERM").ok();
     watch_ui_available(
         force_watch_ui(),
         disable_watch_ui(),
+        term.as_deref(),
         io::stdin().is_terminal(),
         io::stdout().is_terminal(),
     )
@@ -564,16 +600,23 @@ pub(crate) fn run_watch_ui(
     if disable_watch_ui() {
         bail!("watch UI disabled by {DISABLE_WATCH_UI_ENV}");
     }
+    // The initial scheduler probe may block until the configured command
+    // timeout. Resolve it before raw/alternate-screen entry so a slow login node
+    // leaves the user's ordinary terminal visible and normally interruptible.
+    let initial_snapshot = build_ps_snapshot(&record.compose_file, Some(&record.job_id), options)?;
     let guard = TerminalGuard::enter(prefs.mouse)?;
     let mut events = TerminalEventSource;
     let result = run_watch_ui_loop(
         record,
         options,
-        initial_service,
-        lines,
-        hold_on_exit,
+        WatchLoopConfig {
+            initial_snapshot,
+            initial_service,
+            lines,
+            hold_on_exit,
+            prefs,
+        },
         &mut events,
-        prefs,
     );
     drop(guard);
     let result = result?;
@@ -608,6 +651,14 @@ struct WatchLoopResult {
     /// Only inspected by tests; production drives behavior off `outcome`.
     #[cfg_attr(not(test), allow(dead_code))]
     selected_service: Option<String>,
+}
+
+struct WatchLoopConfig<'a> {
+    initial_snapshot: PsSnapshot,
+    initial_service: Option<&'a str>,
+    lines: usize,
+    hold_on_exit: HoldOnExit,
+    prefs: WatchPrefs,
 }
 
 /// Final UI state captured when a replay loop exits. Lets tests assert on the
@@ -684,6 +735,9 @@ fn run_replay_ui_loop(
     let mut renderer = FrameRenderer::new();
 
     loop {
+        if terminal_signal_pending() {
+            bail!("replay UI interrupted by external signal");
+        }
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(last_tick);
         last_tick = now;
@@ -1042,13 +1096,16 @@ fn run_watch_worker(
 fn run_watch_ui_loop(
     record: &SubmissionRecord,
     options: &SchedulerOptions,
-    initial_service: Option<&str>,
-    lines: usize,
-    hold_on_exit: HoldOnExit,
+    config: WatchLoopConfig<'_>,
     events: &mut dyn WatchEventSource,
-    prefs: WatchPrefs,
 ) -> Result<WatchLoopResult> {
-    let mut snapshot = build_ps_snapshot(&record.compose_file, Some(&record.job_id), options)?;
+    let WatchLoopConfig {
+        initial_snapshot: mut snapshot,
+        initial_service,
+        lines,
+        hold_on_exit,
+        prefs,
+    } = config;
     let data_refresh = prefs.data_refresh;
     let metrics_refresh = prefs.metrics_refresh;
     let mut filter: Option<String> = None;
@@ -1131,6 +1188,9 @@ fn run_watch_ui_loop(
     let mut last_render_size: Option<(usize, usize)> = None;
 
     let (outcome, command_hint) = loop {
+        if terminal_signal_pending() {
+            bail!("watch UI interrupted by external signal");
+        }
         // Drain everything the worker queued since the last iteration, keeping
         // only the freshest data/metrics. This never blocks: `try_iter` yields
         // just the already-delivered messages so keystrokes and redraw are never
@@ -1499,10 +1559,15 @@ fn force_watch_ui_from_value(value: Option<&OsStr>) -> bool {
 fn watch_ui_available(
     force: bool,
     disabled: bool,
+    term: Option<&str>,
     stdin_is_terminal: bool,
     stdout_is_terminal: bool,
 ) -> bool {
-    !disabled && (force || (stdin_is_terminal && stdout_is_terminal))
+    !disabled
+        && (force
+            || (!term.is_some_and(|value| value.eq_ignore_ascii_case("dumb"))
+                && stdin_is_terminal
+                && stdout_is_terminal))
 }
 
 pub(crate) fn apply_watch_key(selected_index: usize, service_count: usize, key: WatchKey) -> usize {
@@ -1749,9 +1814,15 @@ pub(crate) fn render_watch_frame(model: &WatchModel, width: usize, height: usize
 fn render_watch_frame_model(model: &WatchFrameModel<'_>, width: usize, height: usize) -> String {
     let width = width.max(1);
     let height = height.max(1);
+    if width < MIN_USABLE_WIDTH || height < MIN_USABLE_HEIGHT {
+        return render_too_small_watch_frame(model, width, height);
+    }
     let effective = effective_services(&model.snapshot.services, model.filter, model.sort_mode);
     let selected = effective.get(model.selected_index);
-    if width < 80 || height < 12 {
+    let Some((table_width, log_width)) = split_layout_widths(width) else {
+        return render_compact_watch_frame(model, &effective, selected.copied(), width, height);
+    };
+    if height < MIN_FULL_LAYOUT_HEIGHT {
         return render_compact_watch_frame(model, &effective, selected.copied(), width, height);
     }
 
@@ -1849,8 +1920,14 @@ fn render_watch_frame_model(model: &WatchFrameModel<'_>, width: usize, height: u
 
     let mut help_lines = Vec::new();
     if model.show_help {
-        help_lines.push("-".repeat(width));
         help_lines.push(fit_line(&term::styled_bold("Keybindings:"), width));
+        // Keep the escape routes and detail toggle first. When the terminal is
+        // too short for the full list, `truncate_full_help` preserves this line
+        // and replaces omitted bindings with an explicit resize hint.
+        help_lines.push(fit_line(
+            "  Enter/Esc detail/back | ? close help | q quit",
+            width,
+        ));
         help_lines.push(fit_line("  j / Down    next service", width));
         help_lines.push(fit_line("  k / Up      previous service", width));
         help_lines.push(fit_line("  g           first service", width));
@@ -1879,21 +1956,19 @@ fn render_watch_frame_model(model: &WatchFrameModel<'_>, width: usize, height: u
             "  o           cycle service sort (spec/triage)",
             width,
         ));
-        if model.replay.is_none() {
+        if restart_action_available(model) {
             help_lines.push(fit_line("  r           restart selected service", width));
         }
-        help_lines.push(fit_line("  Enter       service detail panel", width));
-        help_lines.push(fit_line(
-            "  y           yank logs command to clipboard",
-            width,
-        ));
-        help_lines.push(fit_line(
-            "  d/l/s       debug/logs/stats command after final state",
-            width,
-        ));
-        help_lines.push(fit_line("  ?           toggle help", width));
-        help_lines.push(fit_line("  q           quit", width));
-        help_lines.push("-".repeat(width));
+        if model.replay.is_none() {
+            help_lines.push(fit_line(
+                "  y           yank logs command to clipboard",
+                width,
+            ));
+            help_lines.push(fit_line(
+                "  d/l/s       debug/logs/stats command after final state",
+                width,
+            ));
+        }
     }
 
     let footer = if model.input_mode == InputMode::Search
@@ -1906,17 +1981,15 @@ fn render_watch_frame_model(model: &WatchFrameModel<'_>, width: usize, height: u
         "q exit  d debug  l logs  s stats  ? help"
     } else if model.show_detail {
         "Enter/Esc back  j/k change service  y yank  q quit"
-    } else {
+    } else if restart_action_available(model) {
         "q quit  ? help  Enter detail  / filter  f find  a all  w wrap  o sort  r restart  y yank"
+    } else {
+        "q quit  ? help  Enter detail  / filter  f find  a all  w wrap  o sort  y yank"
     };
     let footer_lines = vec!["-".repeat(width), fit_line(footer, width)];
     let help_budget = height.saturating_sub(lines.len() + search_lines.len() + footer_lines.len());
-    if help_lines.len() > help_budget {
-        help_lines.truncate(help_budget);
-    }
+    help_lines = truncate_full_help(help_lines, help_budget, width);
 
-    let table_width = MIN_TABLE_WIDTH.min(width.saturating_sub(24));
-    let log_width = width.saturating_sub(table_width + 3);
     let body_height = height
         .saturating_sub(lines.len() + search_lines.len() + help_lines.len() + footer_lines.len());
     let mut table_lines = Vec::with_capacity(body_height);
@@ -1939,13 +2012,7 @@ fn render_watch_frame_model(model: &WatchFrameModel<'_>, width: usize, height: u
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "-".to_string());
             let ready = service.healthy.map(yes_no_short).unwrap_or("-");
-            let state_raw = service_state_label(service);
-            let state_styled = styled_state_marker(state_raw);
-            let state_col = format!(
-                "{:<width$}",
-                state_styled,
-                width = 5 + state_styled.len() - state_raw.len()
-            );
+            let state_col = pad_line(&styled_state_marker(service_state_label(service)), 5);
             let restarts = restart_summary(service);
             let exit = service
                 .last_exit_code
@@ -1953,14 +2020,14 @@ fn render_watch_frame_model(model: &WatchFrameModel<'_>, width: usize, height: u
                 .unwrap_or_else(|| "-".to_string());
             table_lines.push(fit_line(
                 &format!(
-                    "{marker} {:<16} {:<12} {:<6} {:<5} {} {:<8} {:<4}",
-                    truncate_cell(&service.service_name, 16),
-                    truncate_cell(step, 12),
-                    pid,
-                    ready,
+                    "{marker} {} {} {} {} {} {} {}",
+                    pad_line(&service.service_name, 16),
+                    pad_line(step, 12),
+                    pad_line(&pid, 6),
+                    pad_line(ready, 5),
                     state_col,
-                    truncate_cell(&restarts, 8),
-                    exit
+                    pad_line(&restarts, 8),
+                    pad_line(&exit, 4),
                 ),
                 table_width,
             ));
@@ -2049,6 +2116,57 @@ fn render_watch_frame_model(model: &WatchFrameModel<'_>, width: usize, height: u
     lines.join("\n")
 }
 
+fn split_layout_widths(width: usize) -> Option<(usize, usize)> {
+    let table_width = MIN_TABLE_WIDTH.min(width.saturating_sub(24));
+    let log_width = width.saturating_sub(table_width + 3);
+    (log_width >= MIN_LOG_PANE_WIDTH).then_some((table_width, log_width))
+}
+
+fn truncate_full_help(mut help_lines: Vec<String>, budget: usize, width: usize) -> Vec<String> {
+    if help_lines.len() <= budget {
+        return help_lines;
+    }
+    if budget == 0 {
+        return Vec::new();
+    }
+    if budget == 1 {
+        return vec![fit_line(
+            "Help: Enter/Esc detail | ? close | q quit | resize taller",
+            width,
+        )];
+    }
+
+    help_lines.truncate(budget);
+    if budget == 2 {
+        help_lines[1] = fit_line(
+            "  Enter/Esc detail | ? close | q quit | more: resize taller",
+            width,
+        );
+    } else {
+        help_lines[budget - 1] = fit_line("  ... more bindings; resize taller", width);
+    }
+    help_lines
+}
+
+fn render_too_small_watch_frame(
+    model: &WatchFrameModel<'_>,
+    width: usize,
+    height: usize,
+) -> String {
+    let title = if model.replay.is_some() {
+        "hpc-compose replay"
+    } else {
+        "hpc-compose watch"
+    };
+    let mut lines = Vec::new();
+    push_fit_line(&mut lines, width, height, title);
+    if height > 2 {
+        push_fit_line(&mut lines, width, height, "terminal too small");
+    }
+    push_fit_line(&mut lines, width, height, "q quit | resize");
+    lines.join("\n")
+}
+
 fn render_compact_watch_frame(
     model: &WatchFrameModel<'_>,
     effective: &[&PsServiceRow],
@@ -2109,6 +2227,18 @@ fn render_compact_watch_frame(
     if let Some(notice) = model.notice {
         push_fit_line(&mut lines, width, height, &term::styled_warning(notice));
     }
+    if let Some(detail) = model.snapshot.scheduler.detail.as_deref() {
+        push_fit_line(&mut lines, width, height, &format!("note: {detail}"));
+    } else if let Some(queue) = &model.snapshot.queue_diagnostics
+        && let Some(reason) = queue.pending_reason.as_deref()
+    {
+        push_fit_line(
+            &mut lines,
+            width,
+            height,
+            &format!("{}: {reason}", term::styled_warning("pending reason")),
+        );
+    }
     if let Some(hold) = model.hold_state {
         push_fit_line(
             &mut lines,
@@ -2138,12 +2268,12 @@ fn render_compact_watch_frame(
         );
     }
     if model.show_help {
-        push_fit_line(
-            &mut lines,
-            width,
-            height,
-            "? help | / filter | f find | w wrap | o sort | q quit",
-        );
+        // Preserve room for the service/log context and footer in constrained
+        // terminals. Taller compact views progressively disclose all controls.
+        let help_budget = height.saturating_sub(lines.len() + 4);
+        for help in compact_help_lines(model).into_iter().take(help_budget) {
+            push_fit_line(&mut lines, width, height, help);
+        }
     }
 
     if let Some(detail_service) = selected.filter(|_| model.show_detail) {
@@ -2229,7 +2359,9 @@ fn render_compact_watch_frame(
         &mut lines,
         width,
         height,
-        if model.replay.is_some() {
+        if model.input_mode == InputMode::Search || model.input_mode == InputMode::LogSearch {
+            "Enter apply  Esc cancel"
+        } else if model.replay.is_some() {
             "q quit  Space play/pause  +/- speed  [/] event"
         } else if model.hold_state.is_some() {
             "q exit  d debug  l logs  s stats"
@@ -2257,6 +2389,29 @@ fn hold_indicator(hold: Option<WatchHoldState>) -> String {
         }
         None => String::new(),
     }
+}
+
+fn restart_action_available(model: &WatchFrameModel<'_>) -> bool {
+    model.replay.is_none() && model.snapshot.record.backend == SubmissionBackend::Local
+}
+
+fn compact_help_lines(model: &WatchFrameModel<'_>) -> Vec<&'static str> {
+    let mut lines = vec![
+        "j/k service | Enter detail | q quit",
+        "/ filter | f find | a logs | w wrap",
+    ];
+    if model.replay.is_some() {
+        lines.push("o sort | Space play | +/- speed");
+        lines.push("Left/Right seek | [/] event");
+    } else {
+        lines.push("o sort | Space pause | PgUp/PgDn scroll");
+        if restart_action_available(model) {
+            lines.push("r restart | End live | y yank");
+        } else {
+            lines.push("End live | y yank logs command");
+        }
+    }
+    lines
 }
 
 fn replay_header_status(replay: &ReplayWatchStatus) -> String {
@@ -2449,8 +2604,9 @@ fn style_log_row(row: &str, query: Option<&str>) -> String {
     }
 }
 
-/// Expands raw log lines for display, wrapping each to `width` when `wrap` is
-/// set. Log lines are plain text, so character count equals visible width.
+/// Expands raw log lines for display, wrapping each to `width` terminal cells
+/// when `wrap` is set. Grapheme clusters stay intact, including combining
+/// sequences and emoji joined with zero-width code points.
 fn expand_log_lines(lines: &[String], width: usize, wrap: bool) -> Vec<String> {
     if !wrap || width == 0 {
         return lines.to_vec();
@@ -2461,9 +2617,19 @@ fn expand_log_lines(lines: &[String], width: usize, wrap: bool) -> Vec<String> {
             out.push(String::new());
             continue;
         }
-        let chars: Vec<char> = line.chars().collect();
-        for chunk in chars.chunks(width) {
-            out.push(chunk.iter().collect());
+        let mut row = String::new();
+        let mut row_width: usize = 0;
+        for grapheme in line.graphemes(true) {
+            let grapheme_width = UnicodeWidthStr::width(grapheme);
+            if !row.is_empty() && row_width.saturating_add(grapheme_width) > width {
+                out.push(std::mem::take(&mut row));
+                row_width = 0;
+            }
+            row.push_str(grapheme);
+            row_width = row_width.saturating_add(grapheme_width);
+        }
+        if !row.is_empty() {
+            out.push(row);
         }
     }
     out
@@ -3397,12 +3563,17 @@ fn visible_width(value: &str) -> usize {
             index += len;
             continue;
         }
-        let ch = value[index..]
-            .chars()
-            .next()
-            .expect("visible_width walked a valid UTF-8 boundary");
-        width += 1;
-        index += ch.len_utf8();
+        let run_end = value[index..]
+            .find('\x1b')
+            .map_or(value.len(), |offset| index + offset);
+        if run_end == index {
+            // Preserve forward progress for an escape form outside the CSI/OSC
+            // sequences recognized above. ESC itself occupies no terminal cell.
+            index += 1;
+            continue;
+        }
+        width += UnicodeWidthStr::width(&value[index..run_end]);
+        index = run_end;
     }
     width
 }
@@ -3415,25 +3586,44 @@ fn truncate_cell(value: &str, width: usize) -> String {
     let bytes = value.as_bytes();
     let mut out = String::new();
     let mut index = 0;
-    let mut visible = 0;
+    let mut visible: usize = 0;
+    let mut copied_ansi = false;
+    let mut truncated = false;
     while index < value.len() {
         if let Some(len) = ansi_escape_len(bytes, index) {
             out.push_str(&value[index..index + len]);
+            copied_ansi = true;
             index += len;
             continue;
         }
-        if visible >= width {
+        let run_end = value[index..]
+            .find('\x1b')
+            .map_or(value.len(), |offset| index + offset);
+        if run_end == index {
+            out.push('\x1b');
+            copied_ansi = true;
+            index += 1;
+            continue;
+        }
+        for grapheme in value[index..run_end].graphemes(true) {
+            let grapheme_width = UnicodeWidthStr::width(grapheme);
+            if grapheme_width > 0 && visible.saturating_add(grapheme_width) > width {
+                truncated = true;
+                break;
+            }
+            out.push_str(grapheme);
+            visible = visible.saturating_add(grapheme_width);
+            index += grapheme.len();
+        }
+        if truncated {
             break;
         }
-        let ch = value[index..]
-            .chars()
-            .next()
-            .expect("truncate_cell walked a valid UTF-8 boundary");
-        out.push(ch);
-        visible += 1;
-        index += ch.len_utf8();
+        index = run_end;
     }
-    if visible >= width && value[index..].contains("\x1b[") {
+    if index < value.len() {
+        truncated = true;
+    }
+    if truncated && copied_ansi {
         out.push_str(ANSI_RESET_ALL);
     }
     out

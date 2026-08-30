@@ -151,3 +151,147 @@ fn when_rejects_unknown_after_job_condition_value() {
         "expected an after-job-condition value error, got: {stderr}"
     );
 }
+
+#[test]
+fn explicit_color_policy_controls_help_and_parse_errors() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+
+    let help_always = run_cli(tmp.path(), &["--color", "always", "watch", "--help"]);
+    assert_success(&help_always);
+    assert!(stdout_text(&help_always).contains("\u{1b}["));
+
+    let help_never = run_cli(tmp.path(), &["--color", "never", "watch", "--help"]);
+    assert_success(&help_never);
+    assert!(!stdout_text(&help_never).contains("\u{1b}["));
+
+    let error_always = run_cli(
+        tmp.path(),
+        &["--color", "always", "definitely-not-a-command"],
+    );
+    assert_failure(&error_always);
+    assert!(stderr_text(&error_always).contains("\u{1b}["));
+
+    let error_never = run_cli(
+        tmp.path(),
+        &["--color", "never", "definitely-not-a-command"],
+    );
+    assert_failure(&error_never);
+    assert!(!stderr_text(&error_never).contains("\u{1b}["));
+
+    let diagnostic_always = run_cli(
+        tmp.path(),
+        &["--color", "always", "validate", "-f", "missing.yaml"],
+    );
+    assert_failure(&diagnostic_always);
+    assert!(stderr_text(&diagnostic_always).contains("\u{1b}["));
+
+    let diagnostic_never = run_cli(
+        tmp.path(),
+        &["--color", "never", "validate", "-f", "missing.yaml"],
+    );
+    assert_failure(&diagnostic_never);
+    assert!(!stderr_text(&diagnostic_never).contains("\u{1b}["));
+
+    let forwarded_always = run_cli_with_env(
+        tmp.path(),
+        &[
+            "run",
+            "-f",
+            "missing.yaml",
+            "service",
+            "--",
+            "child",
+            "--color=always",
+        ],
+        &[("NO_COLOR", "1"), ("TERM", "dumb")],
+    );
+    assert_failure(&forwarded_always);
+    assert!(
+        !stderr_text(&forwarded_always).contains("\u{1b}["),
+        "a child command's --color flag must not control hpc-compose diagnostics"
+    );
+
+    let explicit_always_with_forwarded_never = run_cli_with_env(
+        tmp.path(),
+        &[
+            "--color",
+            "always",
+            "run",
+            "-f",
+            "missing.yaml",
+            "service",
+            "--",
+            "child",
+            "--color=never",
+        ],
+        &[("NO_COLOR", "1"), ("TERM", "dumb")],
+    );
+    assert_failure(&explicit_always_with_forwarded_never);
+    assert!(
+        stderr_text(&explicit_always_with_forwarded_never).contains("\u{1b}["),
+        "the explicit hpc-compose color policy must win over forwarded argv"
+    );
+
+    let forwarded_without_separator = run_cli_with_env(
+        tmp.path(),
+        &[
+            "run",
+            "-f",
+            "missing.yaml",
+            "service",
+            "child",
+            "--color=always",
+        ],
+        &[("NO_COLOR", "1"), ("TERM", "dumb")],
+    );
+    assert_failure(&forwarded_without_separator);
+    assert!(
+        !stderr_text(&forwarded_without_separator).contains("\u{1b}["),
+        "trailing child argv accepted without -- must not control runtime diagnostics"
+    );
+
+    let explicit_with_unseparated_child_flag = run_cli_with_env(
+        tmp.path(),
+        &[
+            "--color",
+            "always",
+            "run",
+            "-f",
+            "missing.yaml",
+            "service",
+            "child",
+            "--color=never",
+        ],
+        &[("NO_COLOR", "1"), ("TERM", "dumb")],
+    );
+    assert_failure(&explicit_with_unseparated_child_flag);
+    assert!(
+        stderr_text(&explicit_with_unseparated_child_flag).contains("\u{1b}["),
+        "the parsed parent policy must win over unseparated trailing child argv"
+    );
+}
+
+#[test]
+fn effective_locale_controls_runtime_diagnostic_unicode() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let output = run_cli_with_env(
+        tmp.path(),
+        &["--color", "never", "validate", "-f", "missing.yaml"],
+        &[
+            ("LC_ALL", "C"),
+            ("LC_CTYPE", "en_US.UTF-8"),
+            ("LANG", "en_US.UTF-8"),
+        ],
+    );
+    assert_failure(&output);
+    let stderr = stderr_text(&output);
+    assert!(
+        !stderr.contains('×'),
+        "LC_ALL=C must select ASCII diagnostics"
+    );
+    assert!(
+        !stderr.contains('│'),
+        "LC_ALL=C must select ASCII diagnostics"
+    );
+    assert!(stderr.contains("x compose spec not found"));
+}

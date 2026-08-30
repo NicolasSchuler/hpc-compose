@@ -749,6 +749,44 @@ fn expand_log_lines_wraps_only_when_enabled() {
 }
 
 #[test]
+fn terminal_cell_helpers_preserve_graphemes_and_ansi_styles() {
+    let combining = "e\u{301}x";
+    assert_eq!(visible_width(combining), 2);
+    assert_eq!(truncate_cell(combining, 1), "e\u{301}");
+
+    assert_eq!(visible_width("A漢B"), 4);
+    assert_eq!(truncate_cell("A漢B", 3), "A漢");
+
+    let styled = "\x1b[31mA漢B\x1b[0m";
+    let truncated = truncate_cell(styled, 3);
+    assert_eq!(visible_width(&truncated), 3);
+    assert!(truncated.starts_with("\x1b[31mA漢"));
+    assert!(truncated.ends_with(ANSI_RESET_ALL));
+
+    let padded_wide = pad_line("漢字", 6);
+    assert_eq!(visible_width(&padded_wide), 6);
+    assert_eq!(padded_wide, "漢字  ");
+}
+
+#[test]
+fn log_wrapping_uses_terminal_cells_without_splitting_graphemes() {
+    let lines = vec!["漢字ab".to_string(), "e\u{301}fg".to_string()];
+    assert_eq!(
+        expand_log_lines(&lines, 4, true),
+        vec![
+            "漢字".to_string(),
+            "ab".to_string(),
+            "e\u{301}fg".to_string()
+        ]
+    );
+    assert!(
+        expand_log_lines(&lines, 4, true)
+            .iter()
+            .all(|line| visible_width(line) <= 4)
+    );
+}
+
+#[test]
 fn replay_scrubber_renders_label_cursor_and_handles_zero_span() {
     let replay = ReplayWatchStatus {
         cursor_unix: 105,
@@ -977,16 +1015,21 @@ fn watch_loop_restart_writes_request_for_local_job() {
         squeue_bin: "/definitely/missing-squeue".into(),
         sacct_bin: "/definitely/missing-sacct".into(),
     };
+    let snapshot =
+        build_ps_snapshot(&record.compose_file, Some(&record.job_id), &options).expect("snapshot");
     // HoldOnExit::Always keeps the completed job open so `r` is processed.
     let mut events = ScriptedEvents::new([normal(WatchKey::Restart), normal(WatchKey::Quit)]);
     run_watch_ui_loop(
         &record,
         &options,
-        None,
-        5,
-        HoldOnExit::Always,
+        WatchLoopConfig {
+            initial_snapshot: snapshot,
+            initial_service: None,
+            lines: 5,
+            hold_on_exit: HoldOnExit::Always,
+            prefs: WatchPrefs::default(),
+        },
         &mut events,
-        WatchPrefs::default(),
     )
     .expect("watch loop runs");
 
@@ -1066,11 +1109,14 @@ fn watch_loop_navigates_services_via_injected_events() {
     let result = run_watch_ui_loop(
         &record,
         &options,
-        None,
-        5,
-        HoldOnExit::Always,
+        WatchLoopConfig {
+            initial_snapshot: snapshot,
+            initial_service: None,
+            lines: 5,
+            hold_on_exit: HoldOnExit::Always,
+            prefs: WatchPrefs::default(),
+        },
         &mut events,
-        WatchPrefs::default(),
     )
     .expect("watch loop runs");
 
@@ -1139,7 +1185,7 @@ fn render_watch_frame_includes_table_and_log_pane() {
             input_mode: InputMode::Normal,
             ..sample_watch_model()
         },
-        100,
+        110,
         18,
     );
     assert!(frame.contains("hpc-compose watch"));
@@ -1151,6 +1197,110 @@ fn render_watch_frame_includes_table_and_log_pane() {
     assert!(frame.contains("worker"));
     assert!(frame.contains("q quit"));
     assert!(frame.lines().count() <= 18);
+}
+
+#[test]
+fn split_layout_requires_a_forty_cell_log_pane() {
+    assert_eq!(split_layout_widths(106), None);
+    assert_eq!(split_layout_widths(107), Some((64, 40)));
+}
+
+#[test]
+fn sub_minimum_height_keeps_resize_and_quit_recovery_visible() {
+    for height in 3..MIN_USABLE_HEIGHT {
+        let frame = render_watch_frame(&sample_watch_model(), 30, height);
+        let lines = frame.lines().collect::<Vec<_>>();
+        assert!(lines.len() <= height);
+        assert!(frame.contains("hpc-compose watch"));
+        assert!(frame.contains("terminal too small"));
+        assert!(frame.contains("q quit | resize"));
+        assert!(lines.iter().all(|line| visible_width(line) <= 30));
+    }
+}
+
+#[test]
+fn full_table_uses_terminal_cell_width_and_preserves_exit_column() {
+    let mut model = sample_watch_model();
+    model.snapshot.services[0].service_name = "漢字".into();
+    model.snapshot.services[0].step_name = Some("e\u{301}-step".into());
+    model.snapshot.services[0].last_exit_code = Some(42);
+
+    let frame =
+        strip_ansi_for_snapshot(&render_watch_frame(&model, 107, 18)).replace('\u{2502}', "|");
+    let header = frame
+        .lines()
+        .find(|line| line.contains("svc              step"))
+        .expect("table header");
+    assert!(header.contains("restarts exit"));
+
+    let row = frame
+        .lines()
+        .find(|line| line.starts_with("> "))
+        .expect("wide service row");
+    let (table, _) = row.split_once(" | ").expect("split table and log panes");
+    let expected_prefix = format!(
+        "> {} {}",
+        pad_line("漢字", 16),
+        pad_line("e\u{301}-step", 12)
+    );
+    assert!(
+        table.starts_with(&expected_prefix),
+        "table row {table:?} did not start with {expected_prefix:?}"
+    );
+    assert_eq!(visible_width(table), MIN_TABLE_WIDTH);
+    assert!(table.ends_with("42  "));
+}
+
+#[test]
+fn help_only_advertises_actions_available_in_the_current_mode() {
+    let mut slurm = sample_watch_model();
+    slurm.show_help = true;
+    let slurm_frame = WatchFrameModel::from(&slurm);
+    assert!(!restart_action_available(&slurm_frame));
+    assert!(
+        compact_help_lines(&slurm_frame)
+            .iter()
+            .all(|line| !line.contains("restart"))
+    );
+    let slurm_help = render_watch_frame(&slurm, 120, 40);
+    assert!(!slurm_help.contains("r           restart"));
+    assert!(!slurm_help.contains("r restart"));
+
+    let mut local = sample_watch_model();
+    local.snapshot.record.backend = SubmissionBackend::Local;
+    local.show_help = true;
+    let local_frame = WatchFrameModel::from(&local);
+    assert!(restart_action_available(&local_frame));
+    assert!(
+        compact_help_lines(&local_frame)
+            .iter()
+            .any(|line| line.contains("r restart"))
+    );
+    assert!(render_watch_frame(&local, 120, 40).contains("r           restart"));
+
+    let mut replay = sample_watch_model();
+    replay.show_help = true;
+    replay.replay = Some(ReplayWatchStatus {
+        cursor_unix: 100,
+        speed: 1.0,
+        paused: true,
+        fidelity: "best-effort".into(),
+        start_unix: 100,
+        end_unix: 110,
+        event_unix: vec![100, 110],
+    });
+    let replay_frame = WatchFrameModel::from(&replay);
+    let replay_help = compact_help_lines(&replay_frame).join("\n");
+    assert!(!replay_help.contains("restart"));
+    assert!(!replay_help.contains("End live"));
+    assert!(!replay_help.contains("PgUp/PgDn"));
+    assert!(replay_help.contains("Left/Right seek"));
+    assert!(!replay_help.contains("yank"));
+    let rendered_replay_help = render_watch_frame(&replay, 120, 40);
+    assert!(!rendered_replay_help.contains("r           restart"));
+    assert!(!rendered_replay_help.contains("debug/logs/stats"));
+    assert!(!rendered_replay_help.contains("return to live"));
+    assert!(!rendered_replay_help.contains("yank"));
 }
 
 #[test]
@@ -1241,7 +1391,7 @@ fn render_watch_frame_normal_snapshot_stays_stable() {
             input_mode: InputMode::Normal,
             ..sample_watch_model()
         },
-        100,
+        110,
         18,
     );
     let lines = canonical_frame_lines(&frame);
@@ -1270,10 +1420,24 @@ fn env_and_terminal_helpers_cover_force_and_fallback_paths() {
     assert!(!force_watch_ui_from_value(Some(OsStr::new("0"))));
     assert!(!force_watch_ui_from_value(None));
 
-    assert!(watch_ui_available(true, false, false, false));
-    assert!(watch_ui_available(false, false, true, true));
-    assert!(!watch_ui_available(false, false, true, false));
-    assert!(!watch_ui_available(true, true, true, true));
+    assert!(watch_ui_available(true, false, Some("dumb"), false, false));
+    assert!(watch_ui_available(
+        false,
+        false,
+        Some("xterm-256color"),
+        true,
+        true
+    ));
+    assert!(!watch_ui_available(false, false, Some("dumb"), true, true));
+    assert!(!watch_ui_available(false, false, Some("DUMB"), true, true));
+    assert!(!watch_ui_available(
+        false,
+        false,
+        Some("xterm-256color"),
+        true,
+        false
+    ));
+    assert!(!watch_ui_available(true, true, None, true, true));
 
     assert_eq!(fallback_terminal_size(Some("101"), Some("33")), (101, 33));
     assert_eq!(
@@ -1646,7 +1810,7 @@ fn render_watch_frame_includes_walltime_bar_when_available() {
             input_mode: InputMode::Normal,
             ..sample_watch_model()
         },
-        100,
+        120,
         14,
     );
     assert!(frame.contains("walltime: ["));
@@ -1809,7 +1973,7 @@ fn render_watch_frame_shows_help_overlay() {
             input_mode: InputMode::Normal,
             ..sample_watch_model()
         },
-        100,
+        120,
         28,
     );
     assert!(frame.contains("Keybindings:"));
@@ -1817,7 +1981,7 @@ fn render_watch_frame_shows_help_overlay() {
     assert!(frame.contains("f           find in logs"));
     assert!(frame.contains("w           toggle log line wrap"));
     assert!(frame.contains("o           cycle service sort"));
-    assert!(frame.contains("q           quit"));
+    assert!(frame.contains("Enter/Esc detail/back | ? close help | q quit"));
     assert!(frame.contains("q quit"));
     assert!(frame.lines().count() <= 28);
 }
@@ -1836,7 +2000,7 @@ fn render_watch_frame_help_snapshot_stays_stable() {
             input_mode: InputMode::Normal,
             ..sample_watch_model()
         },
-        100,
+        110,
         28,
     );
     let lines = canonical_frame_lines(&frame);
@@ -1847,7 +2011,11 @@ fn render_watch_frame_help_snapshot_stays_stable() {
             .iter()
             .any(|line| line == "  /           filter services by name")
     );
-    assert!(lines.iter().any(|line| line == "  q           quit"));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "  Enter/Esc detail/back | ? close help | q quit")
+    );
     assert!(lines.last().unwrap_or(&String::new()).contains("q quit"));
 }
 
@@ -1885,7 +2053,7 @@ fn render_watch_frame_filtered_snapshot_stays_stable() {
             input_mode: InputMode::Normal,
             ..sample_watch_model()
         },
-        100,
+        110,
         14,
     );
     let lines = canonical_frame_lines(&frame);
@@ -1918,7 +2086,7 @@ fn render_watch_frame_bounds_footer_search_and_help() {
             input_mode: InputMode::Search,
             ..sample_watch_model()
         },
-        90,
+        110,
         12,
     );
     assert!(search_frame.contains("filter: api"));
@@ -1943,10 +2111,12 @@ fn render_watch_frame_bounds_footer_search_and_help() {
             input_mode: InputMode::Normal,
             ..sample_watch_model()
         },
-        90,
+        110,
         12,
     );
     assert!(help_frame.contains("Keybindings:"));
+    assert!(help_frame.contains("Enter/Esc detail/back | ? close help | q quit"));
+    assert!(help_frame.contains("... more bindings; resize taller"));
     assert!(help_frame.lines().last().unwrap_or("").contains("q quit"));
     assert!(help_frame.lines().count() <= 12);
 }
@@ -2006,11 +2176,7 @@ fn render_watch_frame_compact_snapshot_stays_stable() {
     assert_anchored_line(&lines, "hpc-compose watch", "hpc-compose watch | job 12345");
     assert_anchored_line(&lines, "filter: api", "filter: api");
     assert_anchored_line(&lines, "filter input:", "filter input: api");
-    assert_anchored_line(
-        &lines,
-        "? help | /",
-        "? help | / filter | f find | w wrap | o sort | q",
-    );
+    assert_anchored_line(&lines, "j/k service", "j/k service | Enter detail | q quit");
     assert_anchored_line(&lines, "> api", "> api OK ready=yes");
     // Exact height is load-bearing here: the compact layout must pack the whole
     // UI (header, filter block, one service row, log title, footer) into exactly

@@ -887,7 +887,7 @@ services:
 #[test]
 fn setup_interactive_writes_settings_and_is_idempotent() {
     let tmpdir = tempfile::tempdir().expect("tmpdir");
-    let setup_input = "dev\ncompose.yaml\n.env,.env.dev\nCACHE_DIR=/shared/cache\nsrun=/opt/slurm/bin/srun\ndev\n";
+    let setup_input = "dev\ncompose.yaml\n.env,.env.dev\nCACHE_DIR=/shared/cache\nsrun=/opt/slurm/bin/srun\n\ndev\n";
     let first = run_cli_with_stdin(tmpdir.path(), &["setup"], setup_input);
     assert_success(&first);
     let settings_path = tmpdir.path().join(".hpc-compose/settings.toml");

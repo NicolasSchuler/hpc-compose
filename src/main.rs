@@ -1,10 +1,11 @@
-use hpc_compose::cli::parse_cli;
+use hpc_compose::cli::{init_early_presentation, parse_cli_from};
 use hpc_compose::cli_error_report;
 use hpc_compose::commands::{run_cli, run_completion_values_from_raw_args};
 use hpc_compose::exit::ExitCodeError;
 
 fn main() {
     let raw_args = std::env::args_os().collect::<Vec<_>>();
+    init_early_presentation(&raw_args);
     match run_completion_values_from_raw_args(&raw_args) {
         Ok(true) => return,
         Ok(false) => {}
@@ -14,7 +15,7 @@ fn main() {
             std::process::exit(code);
         }
     }
-    let cli = parse_cli();
+    let cli = parse_cli_from(&raw_args);
     if let Err(err) = run_cli(cli, &raw_args) {
         // main.rs is the only exit site: derive the process code from the typed
         // error layer's stable catalog (see `hpc_compose::exit`). This maps a

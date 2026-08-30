@@ -83,7 +83,11 @@ pub(super) const WORKFLOW_GROUPS: &[(&str, &str, &[&str])] = &[
 const TOP_LEVEL_HELP_PREAMBLE: &str = "\
 Start from an existing spec:
   hpc-compose plan -f compose.yaml
+  hpc-compose up --dry-run -f compose.yaml  # static submission preview
   hpc-compose up -f compose.yaml
+
+`up` submits one Slurm job and may consume allocation quota; review the dry-run
+preview first when you are not ready to launch.
 
 Create or evolve a spec:
   hpc-compose new --template minimal-batch --name my-app --output compose.yaml

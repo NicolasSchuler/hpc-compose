@@ -78,7 +78,7 @@ After Slurm submission, poll queue state until the job reaches RUNNING before op
 Warn when \-\-watch\-queue stays PENDING longer than this duration; default is 10m, and 0 disables the warning.
 .TP
 \fB--watch\-mode\fR \fIMODE\fR
-Watch output mode. Default: auto. Possible values: auto, tui, line.
+Watch output mode; use line to avoid alternate\-screen controls for recording, piping, or assistive tools. Default: auto. Possible values: auto, tui, line.
 .TP
 \fB--hold\-on\-exit\fR \fIWHEN\fR
 Keep the watch UI open after terminal states. Default: failure. Possible values: never, failure, always.

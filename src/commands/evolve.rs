@@ -41,7 +41,10 @@ pub(crate) fn command(
 
     let format = output_common::resolve_output_format(format);
     if format == OutputFormat::Json && !yes {
-        bail!("hpc-compose evolve --format json requires --yes for noninteractive execution");
+        return Err(hpc_compose::exit::UsageError::new(
+            "hpc-compose evolve --format json requires --yes for noninteractive execution",
+        )
+        .into());
     }
 
     let lesson_id = lesson.unwrap_or_else(|| default_lesson_id().to_string());

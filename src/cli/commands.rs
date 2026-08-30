@@ -896,7 +896,7 @@ pub enum Commands {
             value_enum,
             value_name = "MODE",
             default_value = "auto",
-            help = "Watch output mode"
+            help = "Watch output mode; use line to avoid alternate-screen controls for recording, piping, or assistive tools"
         )]
         watch_mode: WatchMode,
         #[arg(
@@ -1905,7 +1905,7 @@ pub enum Commands {
             value_enum,
             value_name = "MODE",
             default_value = "auto",
-            help = "Watch output mode"
+            help = "Watch output mode; use line to avoid alternate-screen controls for recording, piping, or assistive tools"
         )]
         watch_mode: WatchMode,
         #[arg(
@@ -1963,7 +1963,7 @@ pub enum Commands {
             value_enum,
             value_name = "MODE",
             default_value = "auto",
-            help = "Watch output mode"
+            help = "Replay output mode; use line to avoid alternate-screen controls for recording, piping, or assistive tools"
         )]
         watch_mode: WatchMode,
         #[arg(long, value_enum, value_name = "FORMAT", help = "Output format")]
