@@ -262,7 +262,7 @@ pub(crate) fn dev(
     let mut targets = infer_dev_watch_targets(&prepared.runtime_plan, &context.cwd, &watch_paths)?;
     let outcome = start_prepared_local_launch(&prepared)?;
     if !quiet {
-        print_local_launch_outcome(&prepared, &outcome)?;
+        print_local_launch_outcome(&context, &prepared, &outcome)?;
         println!("watching source directories:");
         for target in &targets {
             println!(
@@ -543,7 +543,7 @@ pub(crate) fn tmux(
         )?;
         let outcome = start_prepared_local_launch(&prepared)?;
         if !quiet {
-            print_local_launch_outcome(&prepared, &outcome)?;
+            print_local_launch_outcome(&context, &prepared, &outcome)?;
         }
         outcome.record
     };

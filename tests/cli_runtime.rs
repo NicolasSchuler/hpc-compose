@@ -1017,13 +1017,17 @@ echo "Submitted batch job 12345"
     assert_success(&submit);
     let out = stdout_text(&submit);
     assert!(out.contains("Submitted batch job 12345"));
-    // The human summary box surfaces parameterized next-step hints, with `pull`
-    // suggested before the destructive `down` so results are collected first.
-    assert!(out.contains("Next:"), "next-step hints shown: {out}");
-    assert!(
-        out.contains("hpc-compose pull --job-id 12345"),
-        "pull hint parameterized with the job id: {out}"
-    );
+    // Every job-specific hint retains the submitted spec and id. This fixture
+    // has no artifact export directory, so a pull hint would be a dead end.
+    let hints = out.split("Next:\n").nth(1).expect("next-step hints");
+    for hint in hints.lines().map(str::trim) {
+        assert!(hint.contains("--job-id 12345"), "{hint}");
+        assert!(
+            hint.contains(&format!("-f '{}'", compose.display())),
+            "{hint}"
+        );
+    }
+    assert!(!hints.contains("hpc-compose pull"));
 }
 
 #[test]
@@ -2617,6 +2621,61 @@ fn write_replay_fixture_with_sidecar(
 
 fn write_replay_fixture(tmpdir: &tempfile::TempDir) -> (std::path::PathBuf, SubmissionRecord) {
     write_replay_fixture_with_sidecar(tmpdir, false)
+}
+
+#[test]
+fn watch_line_mode_reports_changed_queue_reasons_without_repeating_them() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let (compose, _record) = write_replay_fixture(&tmpdir);
+    let count = tmpdir.path().join("queue-polls");
+    let squeue = tmpdir.path().join("squeue");
+    write_script(
+        &squeue,
+        &format!(
+            r#"#!/bin/bash
+set -euo pipefail
+count="$(cat '{count}' 2>/dev/null || echo 0)"
+count=$((count + 1))
+printf '%s\n' "$count" > '{count}'
+case "$count" in
+  1|2) printf 'PENDING|Priority|N/A\n' ;;
+  3) printf 'PENDING|Resources|N/A\n' ;;
+esac
+"#,
+            count = count.display(),
+        ),
+    );
+    let sacct = tmpdir.path().join("sacct");
+    write_script(
+        &sacct,
+        "#!/bin/bash\nprintf 'COMPLETED|Unknown|Unknown|None\\n'\n",
+    );
+
+    let watch = run_cli_with_env(
+        tmpdir.path(),
+        &[
+            "watch",
+            "-f",
+            compose.to_str().expect("path"),
+            "--watch-mode",
+            "line",
+            "--lines",
+            "0",
+            "--squeue-bin",
+            squeue.to_str().expect("path"),
+            "--sacct-bin",
+            sacct.to_str().expect("path"),
+        ],
+        &[("TERM", "dumb"), ("NO_COLOR", "1")],
+    );
+    assert_success(&watch);
+    let stdout = stdout_text(&watch);
+    assert_eq!(stdout.matches("pending reason: Priority").count(), 1);
+    assert_eq!(stdout.matches("pending reason: Resources").count(), 1);
+    assert_eq!(stdout.matches("scheduler state: PENDING").count(), 1);
+    assert!(stdout.contains("scheduler state: COMPLETED"));
+    assert!(!stdout.contains('\x1b'));
+    assert!(!stderr_text(&watch).contains('\x1b'));
 }
 
 #[test]
@@ -13188,4 +13247,167 @@ fn shell_mode_rejects_empty_image_before_srun() {
         "stderr:\n{}",
         stderr_text(&output)
     );
+}
+
+#[test]
+fn recovery_hints_preserve_selected_job_and_quoted_context() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let project = tmpdir.path().join("study's files");
+    fs::create_dir(&project).expect("project");
+    let cache = safe_cache_dir();
+    let compose = write_prepare_compose(&project, cache.path());
+    let plan = runtime_plan(&compose);
+    for job_id in ["12345", "12346"] {
+        let record = build_submission_record(
+            &compose,
+            &project,
+            &project.join("job.sbatch"),
+            &plan,
+            job_id,
+        )
+        .expect("record");
+        write_submission_record(&record).expect("write record");
+        let log = &record.service_logs["app"];
+        fs::create_dir_all(log.parent().expect("log parent")).expect("log dir");
+        fs::write(log, format!("selected run {job_id}\n")).expect("log");
+    }
+    let settings = tmpdir.path().join("site's settings.toml");
+    fs::write(&settings, "version = 1\n[profiles.research]\n").expect("settings");
+    let missing = tmpdir.path().join("missing-scheduler");
+    let result = run_cli(
+        tmpdir.path(),
+        &[
+            "status",
+            "-f",
+            compose.to_str().expect("compose"),
+            "--job-id",
+            "12345",
+            "--settings-file",
+            settings.to_str().expect("settings"),
+            "--profile",
+            "research",
+            "--squeue-bin",
+            missing.to_str().expect("missing"),
+            "--sacct-bin",
+            missing.to_str().expect("missing"),
+        ],
+    );
+    assert_success(&result);
+    let stdout = stdout_text(&result);
+    let hints = stdout.split("Next:\n").nth(1).expect("next commands");
+    let hints = hints.lines().map(str::trim).collect::<Vec<_>>();
+    for hint in &hints {
+        assert!(hint.contains("--job-id 12345"), "{hint}");
+        assert!(hint.contains("--settings-file "), "{hint}");
+        assert!(hint.contains("--profile 'research'"), "{hint}");
+        assert!(hint.contains("study'\\''s files"), "{hint}");
+    }
+    assert!(
+        hints
+            .iter()
+            .all(|hint| !hint.starts_with("hpc-compose artifacts")
+                && !hint.starts_with("hpc-compose pull"))
+    );
+    assert!(
+        hints
+            .iter()
+            .any(|hint| hint.starts_with("hpc-compose down "))
+    );
+    // Execute the supplied read command through a shell, omitting follow so the
+    // regression completes. This checks argument boundaries and old-job lookup.
+    let log_hint = hints
+        .iter()
+        .find(|hint| hint.starts_with("hpc-compose logs "))
+        .expect("logs hint");
+    let args = log_hint
+        .strip_prefix("hpc-compose")
+        .expect("prefix")
+        .strip_suffix(" --follow")
+        .expect("follow");
+    let binary = bin_path().display().to_string().replace('\'', "'\\''");
+    let logs = Command::new("/bin/sh")
+        .args(["-c", &format!("exec '{binary}'{args}")])
+        .current_dir(tmpdir.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run suggested logs");
+    assert_success(&logs);
+    assert!(stdout_text(&logs).contains("selected run 12345"));
+    assert!(!stdout_text(&logs).contains("selected run 12346"));
+}
+
+#[test]
+fn debug_guidance_distinguishes_unavailable_and_terminal_runs() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cache = safe_cache_dir();
+    let compose = write_prepare_compose(tmpdir.path(), cache.path());
+    let plan = runtime_plan(&compose);
+    let record = build_submission_record(
+        &compose,
+        tmpdir.path(),
+        &tmpdir.path().join("job.sbatch"),
+        &plan,
+        "12345",
+    )
+    .expect("record");
+    write_submission_record(&record).expect("write record");
+    let missing = tmpdir.path().join("missing-scheduler");
+    let completed = tmpdir.path().join("sacct-completed");
+    write_script(
+        &completed,
+        "#!/bin/sh\nprintf 'COMPLETED|N/A|N/A|None\\n'\n",
+    );
+    let failed = tmpdir.path().join("sacct-failed");
+    write_script(
+        &failed,
+        "#!/bin/sh\nprintf 'FAILED|N/A|N/A|NonZeroExitCode\\n'\n",
+    );
+    for (sacct, expected_command, expected_note) in [
+        (
+            &missing,
+            "hpc-compose status ",
+            "Scheduler state is unavailable",
+        ),
+        (
+            &completed,
+            "hpc-compose logs ",
+            "no artifact export directory was configured",
+        ),
+        (&failed, "hpc-compose debug ", "The tracked job failed"),
+    ] {
+        let result = run_cli(
+            tmpdir.path(),
+            &[
+                "debug",
+                "-f",
+                compose.to_str().expect("compose"),
+                "--job-id",
+                "12345",
+                "--service",
+                "app",
+                "--squeue-bin",
+                missing.to_str().expect("missing"),
+                "--sacct-bin",
+                sacct.to_str().expect("sacct"),
+                "--format",
+                "json",
+            ],
+        );
+        assert_success(&result);
+        assert!(result.stderr.is_empty(), "{}", stderr_text(&result));
+        let report: Value = serde_json::from_slice(&result.stdout).expect("single JSON object");
+        assert_eq!(report["schema_version"], 1);
+        let next = report["summary"]["next_command"]
+            .as_str()
+            .expect("next command");
+        assert!(next.starts_with(expected_command), "{next}");
+        assert!(next.contains("--job-id 12345"), "{next}");
+        assert!(next.contains("-f '"), "{next}");
+        if sacct != &missing {
+            assert!(next.contains("--service app"), "{next}");
+        }
+        let recommendation = report["recommendation"].as_str().expect("recommendation");
+        assert!(recommendation.contains(expected_note), "{recommendation}");
+        assert!(!recommendation.contains("still active"), "{recommendation}");
+    }
 }

@@ -6,7 +6,7 @@ use anyhow::{bail, ensure};
 use serde_norway::{Mapping, Value};
 
 use super::ComposeSpec;
-use super::validation::validate_root;
+use super::validation::{explain_authoring_type_error, validate_root};
 use crate::domain::{MountParts, split_mount_parts};
 use crate::spec_error::SpecError;
 
@@ -16,6 +16,12 @@ pub(super) fn load_raw_spec(path: &Path) -> Result<ComposeSpec> {
 
 pub(super) fn load_raw_spec_from_str(path: &Path, raw: &str) -> Result<ComposeSpec> {
     load_raw_spec_with_root_text(path, Some(raw))
+}
+
+/// Resolves authoring inheritance before callers inspect referenced variables.
+/// Values remain uninterpolated so callers can report their selected sources.
+pub(super) fn load_resolved_authoring_value(path: &Path) -> Result<Value> {
+    load_resolved_value(path, &mut Vec::new(), None)
 }
 
 /// Parses a self-contained persisted config document without consulting the
@@ -76,9 +82,13 @@ fn load_raw_spec_with_root_text(path: &Path, root_text: Option<&str>) -> Result<
 fn deserialize_spec(path: &Path, value: Value) -> Result<ComposeSpec> {
     // Deserialize through a path tracker so a type mismatch names the exact
     // field (e.g. `services.app.x-slurm.nodes`), not just the file.
-    serde_path_to_error::deserialize(value).map_err(|err| {
+    serde_path_to_error::deserialize(&value).map_err(|err| {
         let field = err.path().to_string();
-        let inner = anyhow::Error::from(err.into_inner());
+        let friendly = explain_authoring_type_error(&value, err.path());
+        let inner = friendly.map_or_else(
+            || anyhow::Error::from(err.into_inner()),
+            anyhow::Error::from,
+        );
         if field == "." {
             inner.context(format!("failed to deserialize spec at {}", path.display()))
         } else {

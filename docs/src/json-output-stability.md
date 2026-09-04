@@ -46,8 +46,9 @@ hpc-compose schema --output jobs-list
 
 Passing an unknown name lists the commands that have a published schema. The
 schemas are generated from the same Rust types that produce the output, and a
-test fails the build if a checked-in schema drifts from what the code emits — so
-a published schema always matches the real output byte-for-byte in shape.
+test fails the build if a checked-in schema drifts from those types. Use the
+published schema for the selected command; similarly named commands can expose
+different structures.
 
 ## A few outputs are intentionally unwrapped
 
@@ -59,16 +60,22 @@ exact current output and are versioned only through their published schema
 
 * `cache list` and `rendezvous list` — bare arrays.
 * `rendezvous resolve` — a record whose own `schema_version` is its disk format.
-* `config` and `inspect` — mirror the compose spec surface (see below), so
-  their top-level object has no `schema_version` field either.
+* `config` and `inspect` — retain their existing configuration and runtime-plan
+  structures (see below), without a top-level `schema_version` field.
 
-## Notes for the effective-config outputs
+## Configuration and runtime-plan outputs
 
-`config` and `inspect` print the resolved compose configuration (their
-published schema names are `spec-config` and `spec-inspect`, as in
-`hpc-compose schema --output spec-config`). Their structure follows the compose
-spec surface documented in the [Spec Reference](spec-reference.md); secret
-values are redacted before printing.
+`config --format json` prints the effective compose configuration, including a
+`services` mapping and `x-slurm` settings. Its schema is `spec-config`:
+`hpc-compose schema --output spec-config`. The fields follow the
+[Spec Reference](spec-reference.md), with defaults and overrides resolved.
+
+`inspect --format json` prints the normalized runtime plan. Its `ordered_services`
+array follows launch order and includes resolved arguments, mounts, and runtime
+image paths; allocation settings are under `slurm`. Its schema is `spec-inspect`:
+`hpc-compose schema --output spec-inspect`. Use this output to inspect execution,
+and `config` to inspect effective YAML values. Both redact secret values before
+printing.
 
 ## Related Docs
 

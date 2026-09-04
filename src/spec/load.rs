@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::interpolate::interpolation_vars;
 use super::parse::{load_raw_spec, load_raw_spec_from_str, load_standalone_raw_spec_from_str};
@@ -175,7 +175,8 @@ impl ComposeSpec {
         mut spec: Self,
         vars: &BTreeMap<String, String>,
     ) -> Result<Self> {
-        spec.interpolate_with_vars(vars)?;
+        spec.interpolate_with_vars(vars)
+            .with_context(|| format!("failed to interpolate spec at {}", path.display()))?;
         // Fold each service's `env_file:` into its `environment` before
         // validation so the merged keys are name-checked and the planner,
         // redaction, and `config` all see a single environment. Done only on
@@ -193,8 +194,10 @@ impl ComposeSpec {
         interpolate_optional_string(&mut self.name, vars)?;
         self.software_env.interpolate(vars)?;
         self.slurm.interpolate(vars)?;
-        for service in self.services.values_mut() {
-            service.interpolate(vars)?;
+        for (name, service) in &mut self.services {
+            service
+                .interpolate(vars)
+                .with_context(|| format!("failed to interpolate service '{name}'"))?;
         }
         Ok(())
     }

@@ -10,6 +10,8 @@ evidence.
 | --- | --- | --- | --- |
 | Is this legal hpc-compose YAML? | `validate` | Parser and semantic validation result | That the request is wise for this site |
 | Is it valid but operationally risky? | `lint` | Stable `HPC...` findings and optional reviewed fixes | That login/compute nodes provide the environment |
+| What values will the spec use? | `config` / `config --variables` | Effective YAML / referenced interpolation variables and their sources | That referenced host paths exist |
+| Which settings and paths were selected? | `context` | Settings file, profile, resolved paths, and value sources | That the submission environment is ready |
 | What execution would be planned? | `plan` | Service order, allocation shape, runtime plan, optional safe hints | That runtime tools or paths exist |
 | What are the normalized topology and mounts? | `inspect` | Normalized services, placement, mounts, argv, and dependency views | Post-run utilization unless `--rightsize` is requested |
 | Where did this generated script line come from? | `render --annotate` / `explain` | Script preview and field-to-line provenance | That the script was submitted or succeeded |
@@ -34,6 +36,11 @@ YAML shape ─► policy risk ─► execution plan ─► normalized details �
 Use JSON output for automation and inspect the corresponding output schema
 before depending on fields. Avoid unredacted `--show-values`, `plan --verbose`,
 or full scripts in shared logs and conversations.
+
+`plan --explain` adds operational hints to the plan. The separate `explain`
+command answers a different question: which YAML field produced a script line.
+`config` shows effective YAML, while `inspect --verbose` shows the derived
+execution model, including argument boundaries and resolved mounts.
 
 ## Environment Readiness
 

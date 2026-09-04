@@ -12,7 +12,7 @@
     {
       "id": "migration",
       "title": "Migration to HoreKa 2",
-      "url": "https://www.nhr.kit.edu/userdocs/horeka2/",
+      "url": "https://docs.nhr.kit.edu/get-started/migration/",
       "covers": "transition timeline, architecture, access-model, and data-migration changes"
     },
     {

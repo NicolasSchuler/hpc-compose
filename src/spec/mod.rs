@@ -1580,6 +1580,7 @@ pub struct EffectiveComposeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sweep: Option<SweepConfig>,
     #[serde(rename = "x-env", skip_serializing_if = "SoftwareEnvConfig::is_empty")]
+    #[schemars(default)]
     pub software_env: SoftwareEnvConfig,
     #[serde(rename = "x-slurm")]
     pub slurm: EffectiveSlurmConfig,
@@ -1791,6 +1792,7 @@ pub struct EffectiveServiceConfig {
     #[serde(rename = "assert", skip_serializing_if = "Option::is_none")]
     pub assertions: Option<ServiceAssertSpec>,
     #[serde(rename = "x-env", skip_serializing_if = "SoftwareEnvConfig::is_empty")]
+    #[schemars(default)]
     pub software_env: SoftwareEnvConfig,
     #[serde(rename = "x-slurm")]
     pub slurm: EffectiveServiceSlurmConfig,
@@ -2579,17 +2581,24 @@ impl EnvironmentSpec {
         match self {
             EnvironmentSpec::None => Ok(()),
             EnvironmentSpec::Map(map) => {
-                for value in map.values_mut() {
-                    *value = interpolate_string(value, vars)?;
+                for (key, value) in map.iter_mut() {
+                    *value = interpolate_string(value, vars).with_context(|| {
+                        format!("failed to interpolate environment key '{key}'")
+                    })?;
                 }
                 Ok(())
             }
             EnvironmentSpec::List(items) => {
-                for item in items.iter_mut() {
+                for (index, item) in items.iter_mut().enumerate() {
                     let Some((key, value)) = item.split_once('=') else {
                         return Err(SpecError::InvalidEnvironmentEntry.into());
                     };
-                    *item = format!("{key}={}", interpolate_string(value, vars)?);
+                    *item = format!(
+                        "{key}={}",
+                        interpolate_string(value, vars).with_context(|| format!(
+                            "failed to interpolate environment[{index}] key '{key}'"
+                        ))?
+                    );
                 }
                 Ok(())
             }
@@ -3531,12 +3540,17 @@ impl NotifyConfig {
 
 impl ServiceSpec {
     fn interpolate(&mut self, vars: &InterpolationVars) -> Result<()> {
-        interpolate_optional_string(&mut self.image, vars)?;
+        interpolate_optional_string(&mut self.image, vars)
+            .context("failed to interpolate image")?;
         if let Some(command) = &mut self.command {
-            command.interpolate_if_vec(vars)?;
+            command
+                .interpolate_if_vec(vars)
+                .context("failed to interpolate command")?;
         }
         if let Some(entrypoint) = &mut self.entrypoint {
-            entrypoint.interpolate_if_vec(vars)?;
+            entrypoint
+                .interpolate_if_vec(vars)
+                .context("failed to interpolate entrypoint")?;
         }
         self.environment.interpolate_values(vars)?;
         if let Some(env_file) = &mut self.env_file {

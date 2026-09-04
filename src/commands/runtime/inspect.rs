@@ -44,8 +44,8 @@ pub(crate) fn status(
         .map(|record| record.compose_file.as_path())
         .unwrap_or(context.compose_file.value.as_path());
     let scheduler_options = SchedulerOptions {
-        squeue_bin: context.binaries.squeue.value,
-        sacct_bin: context.binaries.sacct.value,
+        squeue_bin: context.binaries.squeue.value.clone(),
+        sacct_bin: context.binaries.sacct.value.clone(),
     };
     let mut snapshot = build_status_snapshot_with_array(
         compose_file,
@@ -78,6 +78,7 @@ pub(crate) fn status(
             output::print_next_steps(&output::inspect_next_commands(
                 (!job_id.is_empty()).then_some(job_id),
                 export_dir_configured,
+                &output::command_context_args(&context, &snapshot.record.compose_file),
             ));
         }
         OutputFormat::Json => {

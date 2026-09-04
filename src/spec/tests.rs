@@ -33,6 +33,226 @@ fn missing_top_level_spec_reports_not_found_with_scaffolding_hint() {
     );
 }
 
+#[test]
+fn invalid_authoring_values_identify_the_key_or_argument_and_valid_correction() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let cases = [
+        (
+            "environment: {ENABLED: true}",
+            "services.app.environment.ENABLED",
+            "bool",
+            "environment: {ENABLED: \"true\"}",
+        ),
+        (
+            "environment: {COUNT: 123}",
+            "services.app.environment.COUNT",
+            "number",
+            "environment: {COUNT: \"123\"}",
+        ),
+        (
+            "environment: {EMPTY: null}",
+            "services.app.environment.EMPTY",
+            "null",
+            "environment: {EMPTY: \"\"}",
+        ),
+        (
+            "environment: [123]",
+            "services.app.environment[0]",
+            "number",
+            "environment: [\"COUNT=123\"]",
+        ),
+        (
+            "command: [echo, 123]",
+            "services.app.command[1]",
+            "number",
+            "command: [echo, \"123\"]",
+        ),
+        (
+            "entrypoint: true",
+            "services.app.entrypoint",
+            "bool",
+            "entrypoint: \"true\"",
+        ),
+        (
+            "env_file: [123]",
+            "services.app.env_file[0]",
+            "number",
+            "env_file: []",
+        ),
+        (
+            "x-runtime: {prepare: {env: {COUNT: 123}}}",
+            "services.app.x-runtime.prepare.env.COUNT",
+            "number",
+            "x-runtime: {prepare: {env: {COUNT: \"123\"}}}",
+        ),
+    ];
+    for (invalid, field, got, corrected) in cases {
+        let spec = write_spec(
+            tmpdir.path(),
+            &format!("services:\n  app:\n    image: alpine:3.20\n    {invalid}\n"),
+        );
+        let error = ComposeSpec::load_with_interpolation_vars(&spec, &BTreeMap::new())
+            .expect_err("invalid authoring value");
+        assert!(format!("{error:#}").contains(&spec.display().to_string()));
+        let Some(SpecError::InvalidAuthoringType {
+            field: actual,
+            got: actual_got,
+            ..
+        }) = error.downcast_ref::<SpecError>()
+        else {
+            panic!("expected typed authoring error for {invalid}: {error:#}");
+        };
+        assert_eq!(actual, field);
+        assert_eq!(actual_got, got);
+        assert!(!format!("{error:#}").contains("untagged enum"));
+        let spec = write_spec(
+            tmpdir.path(),
+            &format!("services:\n  app:\n    image: alpine:3.20\n    {corrected}\n"),
+        );
+        ComposeSpec::load_with_interpolation_vars(&spec, &BTreeMap::new())
+            .unwrap_or_else(|error| panic!("suggested correction {corrected} failed: {error:#}"));
+    }
+}
+
+#[test]
+fn descriptive_type_errors_preserve_valid_null_tagged_and_command_forms() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    for fragment in [
+        "command: null",
+        "command: !!str 123",
+        "command: [echo, !!str 123]",
+        "command: echo hello",
+        "environment: null",
+        "environment: {ENABLED: !!str true}",
+        "environment: [\"VALUE=hello\"]",
+        "env_file: null",
+    ] {
+        let spec = write_spec(
+            tmpdir.path(),
+            &format!("services:\n  app:\n    image: alpine:3.20\n    {fragment}\n"),
+        );
+        ComposeSpec::load_with_interpolation_vars(&spec, &BTreeMap::new())
+            .unwrap_or_else(|error| panic!("accepted form {fragment} changed: {error:#}"));
+    }
+}
+
+#[test]
+fn unrelated_env_fields_keep_their_actual_string_or_mapping_contracts() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    for (prefix, reason) in [
+        ("secrets: {MY_TOKEN: {env: true}}\n", "expected a string"),
+        ("x-env: {env: 123}\n", "expected a map"),
+    ] {
+        let spec = write_spec(
+            tmpdir.path(),
+            &format!("{prefix}services:\n  app:\n    image: alpine:3.20\n"),
+        );
+        let error = ComposeSpec::load_with_interpolation_vars(&spec, &BTreeMap::new())
+            .expect_err("invalid field type");
+        let message = format!("{error:#}");
+        assert!(message.contains(reason), "{message}");
+        assert!(!message.contains("KEY=VALUE"));
+        assert!(!matches!(
+            error.downcast_ref::<SpecError>(),
+            Some(SpecError::InvalidAuthoringType { .. })
+        ));
+    }
+}
+
+#[test]
+fn missing_variables_name_file_service_and_environment_key_without_echoing_values() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    for expression in ["prefix-$AUTHORING_MISSING", "prefix-${AUTHORING_MISSING}"] {
+        let spec = write_spec(
+            tmpdir.path(),
+            &format!(
+                "services:\n  app:\n    image: alpine:3.20\n    environment:\n      DATA_ROOT: {expression}\n"
+            ),
+        );
+        let error = ComposeSpec::load_with_interpolation_vars(&spec, &BTreeMap::new())
+            .expect_err("missing variable");
+        let message = format!("{error:#}");
+        assert!(message.contains(&spec.display().to_string()));
+        assert!(message.contains("service 'app'"));
+        assert!(message.contains("environment key 'DATA_ROOT'"));
+        assert!(message.contains("missing variable 'AUTHORING_MISSING'"));
+        assert!(
+            !message.contains("prefix-"),
+            "must not echo the containing value"
+        );
+        let help = error
+            .downcast_ref::<SpecError>()
+            .expect("typed missing variable")
+            .help()
+            .expect("help")
+            .to_string();
+        assert!(help.contains(".env next to the compose file"));
+        assert!(help.contains("${AUTHORING_MISSING:-default}"));
+        ComposeSpec::load_with_interpolation_vars(
+            &spec,
+            &BTreeMap::from([("AUTHORING_MISSING".into(), "/shared/data".into())]),
+        )
+        .expect("supplying the missing variable repairs the spec");
+    }
+}
+
+#[test]
+fn referenced_variables_follow_effective_inheritance_and_leaf_overrides() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    fs::write(tmpdir.path().join("base.yaml"), "services:\n  app:\n    image: alpine:3.20\n    environment:\n      INHERITED: ${BASE_VALUE}\n      REPLACED: ${UNUSED_BASE_VALUE}\n").expect("base");
+    fs::write(tmpdir.path().join("template.yaml"), "services:\n  task:\n    image: alpine:3.20\n    environment:\n      TEMPLATE: ${TEMPLATE_VALUE}\n").expect("template");
+    let path = write_spec(
+        tmpdir.path(),
+        "extends: base.yaml\nservices:\n  app:\n    environment:\n      REPLACED: ${LEAF_VALUE}\n  worker:\n    extends:\n      file: template.yaml\n      service: task\n",
+    );
+    let referenced = referenced_variables(&path, &BTreeMap::new()).expect("resolved references");
+    assert_eq!(
+        referenced,
+        BTreeSet::from([
+            "BASE_VALUE".into(),
+            "LEAF_VALUE".into(),
+            "TEMPLATE_VALUE".into()
+        ])
+    );
+}
+
+#[test]
+fn referenced_variables_skip_literal_shell_bodies_but_keep_exec_and_environment_inputs() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let base = tmpdir.path().join("base.yaml");
+    fs::write(
+        &base,
+        r#"services:
+  app:
+    image: alpine:3.20
+    command: echo ${NAME:=fallback} $HOME
+    entrypoint: ${SHELL:-sh}
+    environment:
+      command: ${ENV_COMMAND}
+  scripted:
+    image: alpine:3.20
+    script: |
+      echo ${OTHER:=fallback} $HOME
+  exec:
+    image: alpine:3.20
+    command: [echo, "${ARGV_INPUT}"]
+"#,
+    )
+    .expect("base");
+    let leaf = write_spec(tmpdir.path(), "extends: base.yaml\n");
+    let vars = BTreeMap::from([
+        ("ENV_COMMAND".into(), "hello".into()),
+        ("ARGV_INPUT".into(), "world".into()),
+    ]);
+    for path in [&base, &leaf] {
+        ComposeSpec::load_with_interpolation_vars(path, &vars).expect("valid shell syntax");
+        assert_eq!(
+            referenced_variables(path, &vars).expect("referenced inputs"),
+            BTreeSet::from(["ENV_COMMAND".into(), "ARGV_INPUT".into()])
+        );
+    }
+}
+
 /// Returns the `pub <name>:` field names declared in the struct that opens with
 /// `marker`, stopping at the struct's closing brace. Used by the
 /// `effective_config` drift guard below.
@@ -4450,7 +4670,7 @@ services:
     let outcome = std::panic::catch_unwind(|| missing_defaulted_variables(&path, &BTreeMap::new()));
     let result = outcome.expect("malformed strict-env scan should not panic");
     let err = result.expect_err("malformed placeholder should fail");
-    assert!(err.to_string().contains("invalid variable expression"));
+    assert!(format!("{err:#}").contains("invalid variable expression"));
 }
 
 #[test]
@@ -4465,7 +4685,10 @@ services:
 "#,
     );
     let err = ComposeSpec::load(&path).expect_err("missing");
-    assert!(err.to_string().contains("missing variable 'IMAGE'"));
+    let message = format!("{err:#}");
+    assert!(message.contains("missing variable 'IMAGE'"));
+    assert!(message.contains(&path.display().to_string()));
+    assert!(message.contains("service 'app'"));
 }
 
 #[test]

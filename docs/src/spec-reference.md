@@ -102,6 +102,16 @@ Rules:
 - Relative host paths in the final plan still resolve against the leaf compose file passed with `-f`.
 - There is no delete or unset syntax in this version.
 
+Sequence appending also applies to exec-form `command` and `entrypoint`.
+For example, a base `command: ["python", "train.py"]` and a child
+`command: ["--epochs", "10"]` produce
+`["python", "train.py", "--epochs", "10"]`. Repeating the executable in
+the child would append a second executable name as an argument. To replace
+the command completely, use a child string such as `command: python evaluate.py`
+(which selects shell form), or keep the complete argument list in the leaf
+spec and omit `command` from the base. Review the result with
+`hpc-compose config -f child.yaml` before running it.
+
 ## `sweep`
 
 `sweep` defines trial variables for `hpc-compose sweep submit`. It is a top-level metadata block; every generated trial is still planned, rendered, submitted, and tracked as a normal one-allocation job.
@@ -844,8 +854,11 @@ Setting both a GPU-carrying `gres` (for example `gres: gpu:2`) and `gpus` at the
 - Any image reference without an explicit `://` scheme is prefixed with `docker://`.
 - Explicit schemes are allowed only for `docker://`, `dockerd://`, and `podman://`.
 - Other schemes are rejected.
-- Shell variables in the image string are expanded at plan time.
-- Unset variables expand to empty strings.
+- Variables in the image string are resolved while loading the spec, including
+  during `validate` and `config`.
+- Missing variables without defaults are errors. Set the variable in the
+  process environment or compose-adjacent `.env`, or use an intentional default
+  such as `image: "${IMAGE:-python:3.11-slim}"`.
 
 ### Local images
 
@@ -871,6 +884,28 @@ Rules:
 - Single-line string-form `command` remains shell form.
 - `script` is a convenience field for multi-line shell snippets and normalizes to `command: ["/bin/sh", "-lc", script]`.
 - `script` cannot be combined with `command` or `entrypoint`.
+- Every exec-form argument must be a string. Quote numeric and boolean
+  arguments, for example `command: ["python", "train.py", "--epochs", "10"]`.
+
+Choose the form according to when variables should resolve:
+
+```yaml
+# Resolve DATA_ROOT from the authoring host while loading the spec.
+command: ["python", "train.py", "--data", "${DATA_ROOT}"]
+```
+
+```yaml
+# Resolve DATA_ROOT in the service's shell when the job runs.
+environment:
+  DATA_ROOT: /data
+script: |
+  python train.py --data "$DATA_ROOT"
+```
+
+String-form `command` and `script` stay literal at spec-load time. Exec-form
+arguments interpolate at spec-load time; use `$$` when an explicit shell
+argument must receive a literal dollar sign. `inspect --verbose -f compose.yaml`
+shows the resolved execution form and arguments.
 
 ## `environment`
 
@@ -890,6 +925,10 @@ environment:
 
 Rules:
 
+- Mapping values must be strings. Quote values that YAML would otherwise read
+  as numbers, booleans, or null: `EPOCHS: "10"`, `ENABLED: "true"`, and
+  `EMPTY: ""`. To read a variable from the authoring host, write
+  `DATA_ROOT: "${DATA_ROOT}"` explicitly.
 - List items must use `KEY=VALUE` syntax.
 - `.env` from the compose file directory is loaded automatically when present.
 - Shell environment variables override `.env`; `.env` fills only missing variables.

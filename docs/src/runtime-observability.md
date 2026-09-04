@@ -110,6 +110,16 @@ Use `hpc-compose up --watch-queue` when you want explicit queue polling before t
 
 Use `--watch-mode line` when you are recording output, using a screen reader, running in CI, or working in a terminal where alternate-screen UIs are inconvenient. Line mode preserves detailed scheduler and log updates without alternate-screen control codes.
 
+Line mode reports changes to pending reasons and estimated start times when
+the scheduler supplies them, even while the job remains pending. A pending
+reason explains what the scheduler is waiting for; it does not establish that
+the application has stalled.
+
+In watch and replay, the service list follows keyboard selection when the
+services do not all fit. Compact layouts reserve room for the selected log and
+keyboard controls. Use line mode or `logs --lines 200` when a very small terminal
+cannot show enough context.
+
 ## Replay
 
 `hpc-compose replay` reconstructs a best-effort execution timeline after the run. It reuses the watch-style view, but reads only artifacts that already exist under the tracked job directory. This makes it useful for rewinding to the time a service failed, comparing the nearest prior metrics sample, or sharing a deterministic text/JSON summary without querying Slurm again.

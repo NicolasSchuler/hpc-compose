@@ -39,6 +39,15 @@ pub(crate) enum SpecError {
     )]
     InvalidFieldType { field: String, got: String },
 
+    #[error("'{field}' must be {expected}, got {got}")]
+    #[diagnostic(code(hpc_compose::spec::invalid_authoring_type), help("{help_text}"))]
+    InvalidAuthoringType {
+        field: String,
+        expected: String,
+        got: String,
+        help_text: String,
+    },
+
     #[error("{scope} uses unsupported key '{key}'")]
     #[diagnostic(code(hpc_compose::spec::unsupported_key), help("{help_text}"))]
     UnsupportedServiceKey {
@@ -326,6 +335,15 @@ pub(crate) enum SpecError {
         help("Provide a non-empty value or remove the field if it is optional.")
     )]
     EmptyField { field: String },
+
+    #[error("missing variable '{name}'")]
+    #[diagnostic(
+        code(hpc_compose::spec::missing_variable),
+        help(
+            "Set {name} in the process environment or in .env next to the compose file. Use ${{{name}:-default}} for an intentional default, or $$ for a literal dollar sign."
+        )
+    )]
+    MissingVariable { name: String },
 
     #[error("{message}")]
     #[diagnostic(code(hpc_compose::spec::required_variable_unset), help("{help_text}"))]

@@ -66,7 +66,7 @@ fn lsp_stdio_publishes_diagnostics_for_did_open() {
                     "uri": uri,
                     "languageId": "yaml",
                     "version": 1,
-                    "text": "services:\n  app:\n    image: alpine:3.20\n    ports: []\n"
+                    "text": "services:\n  app:\n    image: alpine:3.20\n    ports: [] # 🧪\n"
                 }
             }
         }),
@@ -82,6 +82,8 @@ fn lsp_stdio_publishes_diagnostics_for_did_open() {
     assert_eq!(diagnostic["source"], "hpc-compose");
     assert_eq!(diagnostic["code"], "hpc_compose::spec::unsupported_key");
     assert_eq!(diagnostic["data"]["field"], "services.app.ports");
+    assert_eq!(diagnostic["range"]["start"]["character"], 4);
+    assert_eq!(diagnostic["range"]["end"]["character"], 18);
     assert!(
         diagnostic["data"]["recommendation"]
             .as_str()
@@ -89,6 +91,49 @@ fn lsp_stdio_publishes_diagnostics_for_did_open() {
             .contains("ports are not supported"),
         "diagnostic should carry agent recommendation data: {diagnostic}"
     );
+    assert!(
+        diagnostic["message"]
+            .as_str()
+            .expect("message")
+            .contains("Help: ports are not supported; use host-network semantics"),
+        "recovery should also be visible in an ordinary editor: {diagnostic}"
+    );
+
+    write_lsp_message(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [{ "text": "services:\n  app: [" }]
+            }
+        }),
+    );
+    let malformed = recv_lsp_message_matching(&messages, Duration::from_secs(5), |message| {
+        message["params"]["version"] == 2
+    });
+    let message = malformed["params"]["diagnostics"][0]["message"]
+        .as_str()
+        .expect("malformed YAML diagnostic message");
+    assert!(message.contains("expected node content"), "{message}");
+    assert!(message.contains("line 3 column 1"), "{message}");
+
+    write_lsp_message(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 3 },
+                "contentChanges": [{ "text": "services:\n  app:\n    image: alpine:3.20\n" }]
+            }
+        }),
+    );
+    let corrected = recv_lsp_message_matching(&messages, Duration::from_secs(5), |message| {
+        message["params"]["version"] == 3
+    });
+    assert_eq!(corrected["params"]["diagnostics"], json!([]));
 
     write_lsp_message(
         &mut stdin,

@@ -31,8 +31,12 @@ fn pull_rsync_command(
 ) -> (String, String) {
     let login = login_host.unwrap_or("<login-node>");
     let cluster_path = format!("{login}:{}", payload_dir.display());
+    // Quote once for the local shell. Modern rsync protects these literal
+    // filename bytes when passing them onward to the remote shell.
+    let source = crate::shell_quote::quote_if_needed_for_display(&format!("{cluster_path}/"));
+    let destination = crate::shell_quote::quote_if_needed_for_display(&format!("{into_display}/"));
     let suggested_command = format!(
-        "rsync -avz -e 'ssh {opts}' {cluster_path}/ {into_display}/",
+        "rsync -avz -e 'ssh {opts}' -- {source} {destination}",
         opts = control_master_opts_str(),
     );
     (cluster_path, suggested_command)
@@ -206,6 +210,33 @@ mod tests {
         let (cluster_path, command) =
             pull_rsync_command(None, Path::new("/scratch/job/42/artifacts"), "out");
         assert_eq!(cluster_path, "<login-node>:/scratch/job/42/artifacts");
-        assert!(command.contains("<login-node>:/scratch/job/42/artifacts/ out/"));
+        assert!(command.contains("'<login-node>:/scratch/job/42/artifacts/' out/"));
+    }
+
+    #[test]
+    fn pull_rsync_command_preserves_shell_argument_boundaries() {
+        let payload = Path::new("/scratch/study's results/42/artifacts");
+        for into in ["/tmp/laptop's results", "-results"] {
+            let (cluster_path, command) = pull_rsync_command(Some("user@login01"), payload, into);
+            // Define a shell function that captures argv: no rsync or SSH process
+            // can run, even if the command's quoting regresses.
+            let captured = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("rsync() {{ printf '%s\\000' \"$@\"; }}; {command}"))
+                .output()
+                .expect("run shell argument capture");
+            assert!(
+                captured.status.success(),
+                "{}",
+                String::from_utf8_lossy(&captured.stderr)
+            );
+            let args = captured.stdout.split(|byte| *byte == 0).collect::<Vec<_>>();
+            assert_eq!(args.len(), 7, "one source and one destination: {args:?}");
+            assert_eq!(args[0], b"-avz");
+            assert_eq!(args[1], b"-e");
+            assert_eq!(args[3], b"--");
+            assert_eq!(args[4], format!("{cluster_path}/").as_bytes());
+            assert_eq!(args[5], format!("{into}/").as_bytes());
+        }
     }
 }

@@ -87,6 +87,7 @@ pub(crate) fn debug(
     }
 
     let Some(record) = record else {
+        let command_context = output::command_context_args(&context, &context.compose_file.value);
         let report = DebugReport {
             schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
             tracked: false,
@@ -97,7 +98,7 @@ pub(crate) fn debug(
                 failed_service: None,
                 exit_code: None,
                 log_path: None,
-                next_command: format!("hpc-compose up -f {}", context.compose_file.value.display()),
+                next_command: format!("hpc-compose plan{command_context}"),
             },
             status: None,
             ps: None,
@@ -105,9 +106,7 @@ pub(crate) fn debug(
             service_logs: Vec::new(),
             notes,
             recommendation: format!(
-                "No tracked run was found. Run `hpc-compose plan -f {}` before `hpc-compose up -f {}`.",
-                context.compose_file.value.display(),
-                context.compose_file.value.display()
+                "No tracked run was found. Run `hpc-compose plan{command_context}` before `hpc-compose up{command_context}`."
             ),
             preflight: preflight_json,
         };
@@ -172,13 +171,14 @@ pub(crate) fn debug(
             ),
         });
     }
-    let recommendation = debug_recommendation(&debug_compose_file, &status_snapshot);
-    let summary = build_debug_summary(
-        &debug_compose_file,
-        &record.job_id,
+    let command_context = output::command_context_args(&context, &debug_compose_file);
+    let (next_command, recommendation) = debug_guidance(
+        &command_context,
         &status_snapshot,
-        &recommendation,
+        service.as_deref(),
+        run_preflight_again,
     );
+    let summary = build_debug_summary(&status_snapshot, next_command);
     let report = DebugReport {
         schema_version: crate::output::OUTPUT_SCHEMA_VERSION,
         tracked: true,
@@ -236,10 +236,8 @@ fn resolved_binary_overrides(context: &ResolvedContext) -> BinaryOverrides {
 }
 
 fn build_debug_summary(
-    compose_file: &Path,
-    job_id: &str,
     status: &hpc_compose::job::StatusSnapshot,
-    recommendation: &str,
+    next_command: String,
 ) -> DebugSummary {
     let failed = status.services.iter().find(|service| {
         service.status.as_deref() == Some("failed")
@@ -255,15 +253,7 @@ fn build_debug_summary(
                 .present
                 .then(|| status.batch_log.path.clone())
         }),
-        next_command: if status.scheduler.failed {
-            format!(
-                "hpc-compose debug -f {} --job-id {} --preflight",
-                compose_file.display(),
-                job_id
-            )
-        } else {
-            recommendation.to_string()
-        },
+        next_command,
     }
 }
 
@@ -377,25 +367,77 @@ fn tail_file_lines(path: &Path, lines: usize) -> Result<Vec<String>> {
     Ok(collected)
 }
 
-fn debug_recommendation(
-    compose_file: &Path,
+fn debug_guidance(
+    command_context: &str,
     snapshot: &hpc_compose::job::StatusSnapshot,
-) -> String {
+    service: Option<&str>,
+    preflight_was_run: bool,
+) -> (String, String) {
+    let target = format!(
+        "{command_context} --job-id {}",
+        crate::shell_quote::quote_if_needed_for_display(&snapshot.record.job_id)
+    );
+    let service_arg = service
+        .map(|name| {
+            format!(
+                " --service {}",
+                crate::shell_quote::quote_if_needed_for_display(name)
+            )
+        })
+        .unwrap_or_default();
+    let logs = format!("hpc-compose logs{target}{service_arg}");
     if snapshot.scheduler.failed {
-        format!(
-            "Run `hpc-compose debug -f {} --preflight` if preflight has not been rerun, then inspect the batch log above.",
-            compose_file.display()
-        )
+        let next = if preflight_was_run {
+            logs
+        } else {
+            format!("hpc-compose debug{target}{service_arg} --preflight")
+        };
+        let recommendation = if preflight_was_run {
+            format!(
+                "The tracked job failed. Inspect the batch log above and use `{next}` for service logs."
+            )
+        } else {
+            format!(
+                "The tracked job failed. Run `{next}` to check prerequisites, then inspect the batch log above."
+            )
+        };
+        (next, recommendation)
     } else if snapshot.scheduler.terminal {
-        format!(
-            "The tracked job is terminal. Use `hpc-compose artifacts -f {}` if artifacts are configured.",
-            compose_file.display()
+        let export_configured = snapshot
+            .record
+            .artifact_export_dir
+            .as_deref()
+            .is_some_and(|path| !path.trim().is_empty());
+        let next = if export_configured {
+            format!("hpc-compose artifacts{target}")
+        } else {
+            logs
+        };
+        let recommendation = if export_configured {
+            format!("The tracked job is terminal. Use `{next}` to export its configured artifacts.")
+        } else {
+            format!(
+                "The tracked job is terminal. Use `{next}` to review its service logs; no artifact export directory was configured."
+            )
+        };
+        (next, recommendation)
+    } else if snapshot.scheduler.source == hpc_compose::job::SchedulerSource::LocalOnly
+        && snapshot.record.backend == hpc_compose::job::SubmissionBackend::Slurm
+    {
+        let next = format!("hpc-compose status{target}");
+        (
+            next.clone(),
+            format!(
+                "Scheduler state is unavailable; the job may still be queued, running, or finished. Check the scheduler note above, then retry `{next}`. Existing logs remain available with `{logs}`."
+            ),
         )
     } else {
-        format!(
-            "The tracked job is still active. Use `hpc-compose watch -f {}` or `hpc-compose logs -f {} --follow`.",
-            compose_file.display(),
-            compose_file.display()
+        let next = format!("hpc-compose watch{target}{service_arg}");
+        (
+            next.clone(),
+            format!(
+                "The tracked job is still active. Use `{next}` to monitor it or `{logs} --follow` to follow its service logs."
+            ),
         )
     }
 }

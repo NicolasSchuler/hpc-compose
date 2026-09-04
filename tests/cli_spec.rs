@@ -1628,7 +1628,9 @@ x-slurm:
 services:
   app:
     image: redis:7
-    command: /bin/sh -lc "printf '%s' ${API_TOKEN}"
+    environment:
+      API_TOKEN: ${API_TOKEN}
+    command: /bin/sh -lc "printf '%s' ${API_TOKEN} ${RUNTIME_ONLY}"
 "#,
     );
     let cache_dir = cache_root.path().display().to_string();
@@ -1645,6 +1647,7 @@ services:
         &[
             ("CACHE_DIR", cache_dir.as_str()),
             ("API_TOKEN", "super-secret-token"),
+            ("RUNTIME_ONLY", "expanded-by-the-service-shell"),
             ("UNUSED_SECRET", "should-not-appear"),
         ],
     );
@@ -1653,6 +1656,7 @@ services:
     assert_eq!(payload["variables"]["CACHE_DIR"], Value::from(cache_dir));
     assert_eq!(payload["variables"]["API_TOKEN"], Value::from("<redacted>"));
     assert!(payload["variables"].get("UNUSED_SECRET").is_none());
+    assert!(payload["variables"].get("RUNTIME_ONLY").is_none());
     assert_eq!(payload["sources"]["API_TOKEN"], Value::from("processenv"));
 
     let output = run_cli_with_env(

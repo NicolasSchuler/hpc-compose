@@ -217,11 +217,18 @@ pub(crate) fn artifact_export_configured(plan: &RuntimePlan) -> bool {
 pub(crate) fn submit_next_commands(
     job_id: Option<&str>,
     export_dir_configured: bool,
+    command_context: &str,
 ) -> Vec<String> {
-    let target = job_id.map_or(String::new(), |id| format!(" --job-id {id}"));
+    let target = format!(
+        "{command_context}{}",
+        job_id.map_or(String::new(), |id| format!(
+            " --job-id {}",
+            quote_if_needed_for_display(id)
+        ))
+    );
     let mut commands = vec![
         format!("hpc-compose status{target}"),
-        "hpc-compose logs --follow".to_string(),
+        format!("hpc-compose logs{target} --follow"),
         format!("hpc-compose stats{target}"),
     ];
     // Secure results before the destructive `down`. `artifacts` exports the
@@ -229,9 +236,9 @@ pub(crate) fn submit_next_commands(
     // downstream jobs read); `pull` only prints a laptop rsync.
     if export_dir_configured {
         commands.push(format!("hpc-compose artifacts{target}"));
+        commands.push(format!("hpc-compose pull{target}"));
     }
-    commands.push(format!("hpc-compose pull{target}"));
-    commands.push("hpc-compose down".to_string());
+    commands.push(format!("hpc-compose down{target}"));
     commands
 }
 
@@ -242,18 +249,43 @@ pub(crate) fn submit_next_commands(
 pub(crate) fn inspect_next_commands(
     job_id: Option<&str>,
     export_dir_configured: bool,
+    command_context: &str,
 ) -> Vec<String> {
-    let target = job_id.map_or(String::new(), |id| format!(" --job-id {id}"));
+    let target = format!(
+        "{command_context}{}",
+        job_id.map_or(String::new(), |id| format!(
+            " --job-id {}",
+            quote_if_needed_for_display(id)
+        ))
+    );
     let mut commands = vec![
-        "hpc-compose logs --follow".to_string(),
+        format!("hpc-compose logs{target} --follow"),
         format!("hpc-compose stats{target}"),
     ];
     if export_dir_configured {
         commands.push(format!("hpc-compose artifacts{target}"));
+        commands.push(format!("hpc-compose pull{target}"));
     }
-    commands.push(format!("hpc-compose pull{target}"));
-    commands.push("hpc-compose down".to_string());
+    commands.push(format!("hpc-compose down{target}"));
     commands
+}
+
+/// Shell arguments that keep a suggested command in the selected spec context.
+pub(crate) fn command_context_args(
+    context: &hpc_compose::context::ResolvedContext,
+    compose_file: &Path,
+) -> String {
+    let mut args = file_arg(Some(compose_file));
+    if let Some(settings_file) = context.settings_path.as_deref() {
+        args.push_str(&format!(" --settings-file {}", shell_arg(settings_file)));
+    }
+    if let Some(profile) = context.selected_profile.as_deref() {
+        args.push_str(&format!(
+            " --profile {}",
+            crate::shell_quote::quote_always_with_backslash_apostrophe(profile)
+        ));
+    }
+    args
 }
 
 fn file_arg(file: Option<&Path>) -> String {
@@ -269,8 +301,8 @@ fn shell_arg(path: &Path) -> String {
 /// Suggested next commands after a clean spec check (`validate`): continue along
 /// the authoring -> run funnel. Include the resolved compose file when known so
 /// the hint keeps targeting the spec the user just checked.
-pub(crate) fn validate_next_commands(file: Option<&Path>) -> Vec<String> {
-    let file = file_arg(file);
+pub(crate) fn validate_next_commands(file: Option<&Path>, command_context: &str) -> Vec<String> {
+    let file = format!("{}{command_context}", file_arg(file));
     vec![
         format!("hpc-compose plan{file}"),
         format!("hpc-compose preflight{file}"),
@@ -281,9 +313,12 @@ pub(crate) fn validate_next_commands(file: Option<&Path>) -> Vec<String> {
 
 /// Suggested next command once a run is ready to launch — after a clean
 /// `preflight` or a successful `prepare`.
-pub(crate) fn ready_to_run_next_commands(file: Option<&Path>) -> Vec<String> {
+pub(crate) fn ready_to_run_next_commands(
+    file: Option<&Path>,
+    command_context: &str,
+) -> Vec<String> {
     vec![format!(
-        "hpc-compose up{} # submits one Slurm job and may consume quota",
+        "hpc-compose up{}{command_context} # submits one Slurm job and may consume quota",
         file_arg(file)
     )]
 }
@@ -1369,7 +1404,7 @@ fn write_service_outcome_summary(
             duration,
         ]);
     }
-    write!(writer, "{table}")?;
+    writeln!(writer, "{table}")?;
     Ok(())
 }
 
@@ -3373,6 +3408,7 @@ pub(crate) fn print_submit_summary_box(
     job_id: &str,
     script_path: &Path,
     tracked_metadata_path: Option<&Path>,
+    command_context: &str,
 ) {
     let separator = "\u{2500}".repeat(50);
     println!("{separator}");
@@ -3407,6 +3443,7 @@ pub(crate) fn print_submit_summary_box(
     print_next_steps(&submit_next_commands(
         Some(job_id),
         artifact_export_configured(plan),
+        command_context,
     ));
 }
 

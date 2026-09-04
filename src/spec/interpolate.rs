@@ -89,12 +89,9 @@ pub fn referenced_variables(
     path: &Path,
     vars: &BTreeMap<String, String>,
 ) -> Result<BTreeSet<String>> {
-    let raw =
-        fs::read_to_string(path).context(format!("failed to read spec at {}", path.display()))?;
-    let value: Value = serde_norway::from_str(&raw)
-        .context(format!("failed to parse YAML at {}", path.display()))?;
+    let value = super::parse::load_resolved_authoring_value(path)?;
     let mut referenced = BTreeSet::new();
-    collect_referenced_variables_from_value(&value, vars, &mut referenced)?;
+    collect_referenced_variables_from_value(&value, vars, &mut referenced, &mut Vec::new())?;
     Ok(referenced)
 }
 
@@ -102,18 +99,36 @@ fn collect_referenced_variables_from_value(
     value: &Value,
     vars: &BTreeMap<String, String>,
     out: &mut BTreeSet<String>,
+    path: &mut Vec<String>,
 ) -> Result<()> {
     match value {
-        Value::String(current) => collect_referenced_variables_in_string(current, vars, out),
+        Value::String(current) => {
+            // Shell bodies are evaluated by the service shell at runtime. Do
+            // not interpret its parameter syntax or report its variables as
+            // author-host inputs. Exec-list elements have an extra index and
+            // remain interpolated; environment keys named `command` do too.
+            if matches!(path.as_slice(), [root, _, field]
+                if root == "services" && matches!(field.as_str(), "command" | "entrypoint" | "script"))
+            {
+                return Ok(());
+            }
+            collect_referenced_variables_in_string(current, vars, out)
+        }
         Value::Sequence(items) => {
-            for item in items {
-                collect_referenced_variables_from_value(item, vars, out)?;
+            for (index, item) in items.iter().enumerate() {
+                path.push(index.to_string());
+                let result = collect_referenced_variables_from_value(item, vars, out, path);
+                path.pop();
+                result?;
             }
             Ok(())
         }
         Value::Mapping(entries) => {
-            for value in entries.values() {
-                collect_referenced_variables_from_value(value, vars, out)?;
+            for (key, value) in entries {
+                path.push(key.as_str().unwrap_or("").to_string());
+                let result = collect_referenced_variables_from_value(value, vars, out, path);
+                path.pop();
+                result?;
             }
             Ok(())
         }
@@ -407,7 +422,7 @@ pub(super) fn interpolate_string(input: &str, vars: &InterpolationVars) -> Resul
         match vars.get(&name) {
             Some(value) => out.push_str(value),
             None if default_usage_tracking_active() => {}
-            None => bail!("missing variable '{name}' referenced in '{input}'"),
+            None => return Err(SpecError::MissingVariable { name }.into()),
         }
     }
 
@@ -499,7 +514,10 @@ fn resolve_required_variable(name: &str, vars: &InterpolationVars) -> Result<Str
     match vars.get(name) {
         Some(value) => Ok(value.clone()),
         None if default_usage_tracking_active() => Ok(String::new()),
-        None => Err(anyhow::anyhow!("missing variable '{name}'")),
+        None => Err(SpecError::MissingVariable {
+            name: name.to_string(),
+        }
+        .into()),
     }
 }
 
@@ -1143,11 +1161,8 @@ services:
         )
         .expect("compose");
 
-        assert!(
-            missing_defaulted_variables(&path, &BTreeMap::new())
-                .expect_err("unterminated expression")
-                .to_string()
-                .contains("unterminated variable expression")
-        );
+        let error = missing_defaulted_variables(&path, &BTreeMap::new())
+            .expect_err("unterminated expression");
+        assert!(format!("{error:#}").contains("unterminated variable expression"));
     }
 }

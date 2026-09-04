@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use hpc_compose::cli::{DependencyOutputFormat, OutputFormat, SchemaKind};
@@ -104,9 +104,10 @@ pub(crate) fn validate(
                 hpc_compose::diagnostics::warn(warning);
             }
             if !quiet {
-                output::print_next_steps(&output::validate_next_commands(Some(
-                    &context.compose_file.value,
-                )));
+                output::print_next_steps(&output::validate_next_commands(
+                    None,
+                    &output::command_context_args(&context, &context.compose_file.value),
+                ));
             }
         }
         OutputFormat::Json => {
@@ -453,7 +454,7 @@ pub(crate) fn plan(
     let explanations = build_plan_hints(
         &runtime_plan,
         &cluster_warnings,
-        &context.compose_file.value,
+        &output::command_context_args(&context, &context.compose_file.value),
     );
 
     // Every output path must redact resolved secret values, mirroring `inspect`.
@@ -515,7 +516,7 @@ pub(crate) fn plan(
 fn build_plan_hints(
     runtime_plan: &RuntimePlan,
     cluster_warnings: &[String],
-    compose_file: &Path,
+    command_context: &str,
 ) -> Vec<PlanHint> {
     let mut hints = Vec::new();
     for warning in cluster_warnings {
@@ -542,7 +543,7 @@ fn build_plan_hints(
     if runtime_plan.slurm.artifacts.is_some() {
         hints.push(PlanHint {
             level: "info",
-            message: "artifact collection is configured; use `hpc-compose artifacts` after the run to export bundles".to_string(),
+            message: format!("artifact collection is configured; use `hpc-compose artifacts{command_context}` after the run to export bundles"),
         });
     }
     for service in &runtime_plan.ordered_services {
@@ -579,20 +580,17 @@ fn build_plan_hints(
             });
         }
     }
-    let compose_arg = crate::shell_quote::quote_always_with_backslash_apostrophe(
-        &compose_file.display().to_string(),
-    );
     if crate::platform::is_macos() {
         hints.push(PlanHint {
             level: "next",
             message: format!(
-                "inspect with `hpc-compose plan --show-script -f {compose_arg}`; run `hpc-compose up -f {compose_arg}` from a Linux Slurm login node (macOS is authoring-only)"
+                "inspect with `hpc-compose plan --show-script{command_context}`; run `hpc-compose up{command_context}` from a Linux Slurm login node (macOS is authoring-only)"
             ),
         });
     } else {
         hints.push(PlanHint {
             level: "next",
-            message: format!("command: hpc-compose up -f {compose_arg}"),
+            message: format!("command: hpc-compose up{command_context}"),
         });
     }
     hints
@@ -842,9 +840,10 @@ pub(crate) fn prepare(
     match output_format {
         OutputFormat::Text if !quiet => {
             output_spec::print_prepare_summary(&summary);
-            output::print_next_steps(&output::ready_to_run_next_commands(Some(
-                &context.compose_file.value,
-            )));
+            output::print_next_steps(&output::ready_to_run_next_commands(
+                None,
+                &output::command_context_args(&context, &context.compose_file.value),
+            ));
         }
         OutputFormat::Text => {}
         OutputFormat::Json => {
@@ -925,9 +924,10 @@ pub(crate) fn preflight(
     }
     // Reached only on a clean pass; point at the run.
     if output_format == OutputFormat::Text && !quiet {
-        output::print_next_steps(&output::ready_to_run_next_commands(Some(
-            &context.compose_file.value,
-        )));
+        output::print_next_steps(&output::ready_to_run_next_commands(
+            None,
+            &output::command_context_args(&context, &context.compose_file.value),
+        ));
     }
     Ok(())
 }

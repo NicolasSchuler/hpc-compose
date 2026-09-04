@@ -4,6 +4,84 @@ use crate::support::*;
 use hpc_compose::context::Settings;
 use serde_json::Value;
 
+#[test]
+fn authoring_next_commands_preserve_explicit_settings_and_profile() {
+    let tmpdir = tempfile::tempdir().expect("tmpdir");
+    let project = tmpdir.path().join("researcher's project");
+    fs::create_dir_all(&project).expect("project");
+    let compose = write_compose(
+        &project,
+        "study.yaml",
+        "services:\n  app:\n    image: ${HPC_UX_PROFILE_IMAGE}\n    command: [echo, hello]\n",
+    );
+    let settings = project.join("custom settings.toml");
+    fs::write(
+        &settings,
+        "[profiles.\"research profile\".env]\nHPC_UX_PROFILE_IMAGE = \"alpine:3.20\"\n",
+    )
+    .expect("settings");
+    let args = [
+        "--offline",
+        "--settings-file",
+        settings.to_str().expect("settings path"),
+        "--profile",
+        "research profile",
+        "validate",
+        "-f",
+        compose.to_str().expect("compose path"),
+    ];
+    let checked = run_cli(tmpdir.path(), &args);
+    assert_success(&checked);
+    let text = stdout_text(&checked);
+    let hint = text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("hpc-compose plan "))
+        .expect("plan hint");
+    // Execute the printed shell arguments from outside the project. The image
+    // variable exists only in the explicitly selected settings/profile, and
+    // both the apostrophe and spaces must survive the copyable command.
+    let command = hint.replacen("hpc-compose ", "\"$1\" --offline ", 1);
+    let followed = std::process::Command::new("/bin/sh")
+        .args(["-c", &command, "hpc-ux-hint"])
+        .arg(bin_path())
+        .current_dir(tmpdir.path())
+        .output()
+        .expect("follow plan hint");
+    assert_success(&followed);
+    assert!(stdout_text(&followed).contains("docker://alpine:3.20"));
+
+    let plan = run_cli(
+        tmpdir.path(),
+        &[
+            "--offline",
+            "--settings-file",
+            settings.to_str().unwrap(),
+            "--profile",
+            "research profile",
+            "plan",
+            "--explain",
+            "--format",
+            "json",
+            "-f",
+            compose.to_str().unwrap(),
+        ],
+    );
+    assert_success(&plan);
+    let payload: Value = serde_json::from_slice(&plan.stdout).expect("plan json");
+    let next = payload["explanations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hint| hint["level"] == "next")
+        .unwrap()["message"]
+        .as_str()
+        .unwrap();
+    assert!(next.contains("--settings-file"));
+    assert!(next.contains("--profile 'research profile'"));
+    assert!(!next.contains("HPC_UX_PROFILE_IMAGE"));
+}
+
 fn write_profile_settings(
     root: &std::path::Path,
     profile: &str,
@@ -273,7 +351,9 @@ x-slurm:
 services:
   app:
     image: {}
-    command: /bin/sh -lc "printf '%s' '${{API_TOKEN}}'"
+    command: /bin/sh -lc "printf '%s' '${{API_TOKEN}}' '${{RUNTIME_ONLY}}'"
+    environment:
+      API_TOKEN: ${{API_TOKEN}}
 "#,
             local_image.display()
         ),
@@ -292,6 +372,7 @@ compose_file = "{}"
 [profiles.dev.env]
 CACHE_DIR = "{}"
 API_TOKEN = "super-secret-token"
+RUNTIME_ONLY = "not-an-authoring-input"
 UNUSED_SECRET = "should-not-appear"
 "#,
             compose.file_name().and_then(|v| v.to_str()).expect("name"),
@@ -315,6 +396,7 @@ UNUSED_SECRET = "should-not-appear"
         Value::from("<redacted>")
     );
     assert!(payload["interpolation_vars"].get("UNUSED_SECRET").is_none());
+    assert!(payload["interpolation_vars"].get("RUNTIME_ONLY").is_none());
     assert_eq!(
         payload["interpolation_var_sources"]["API_TOKEN"],
         Value::from("profile")

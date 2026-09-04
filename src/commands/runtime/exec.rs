@@ -330,6 +330,7 @@ pub(crate) fn run_service(
             &record.job_id,
             &script_path,
             Some(&latest_record_path(&record)),
+            &output::command_context_args(&context, &record.compose_file),
         );
         let status = Command::new("bash")
             .arg(&script_path)
@@ -395,6 +396,7 @@ pub(crate) fn run_service(
         &record.job_id,
         &script_path,
         Some(&latest_record_path(&record)),
+        &output::command_context_args(&context, &record.compose_file),
     );
     output::finish_watch(
         &record,
@@ -629,6 +631,7 @@ pub(crate) fn run_ephemeral(
             &record.job_id,
             &script_path,
             Some(&latest_record_path(&record)),
+            &output::command_context_args(&context, &record.compose_file),
         );
         return output::finish_watch(
             &record,
@@ -687,6 +690,7 @@ pub(crate) fn run_ephemeral(
         &record.job_id,
         &script_path,
         Some(&latest_record_path(&record)),
+        &output::command_context_args(&context, &record.compose_file),
     );
     output::finish_watch(
         &record,
@@ -1099,6 +1103,7 @@ pub(crate) fn notebook(
             &record.job_id,
             &script_path,
             Some(&latest_record_path(&record)),
+            &output::command_context_args(&context, &record.compose_file),
         );
     }
 

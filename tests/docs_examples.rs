@@ -638,9 +638,12 @@ fn generated_site_guide_facts_keep_verification_and_primary_sources() {
         "site facts should cite primary sources"
     );
     assert!(
-        sources.iter().all(|source| source["url"]
-            .as_str()
-            .is_some_and(|url| url.starts_with("https://www.nhr.kit.edu/"))),
+        sources
+            .iter()
+            .all(|source| source["url"].as_str().is_some_and(|url| {
+                url.starts_with("https://www.nhr.kit.edu/")
+                    || url.starts_with("https://docs.nhr.kit.edu/")
+            })),
         "HAICORE facts should cite the official NHR@KIT documentation"
     );
 }

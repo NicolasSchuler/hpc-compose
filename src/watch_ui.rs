@@ -2000,7 +2000,9 @@ fn render_watch_frame_model(model: &WatchFrameModel<'_>, width: usize, height: u
     if effective.is_empty() {
         table_lines.push(fit_line("  no services match filter", table_width));
     } else {
-        for (index, service) in effective.iter().enumerate() {
+        let service_rows = body_height.saturating_sub(1);
+        let first = service_viewport_start(model.selected_index, effective.len(), service_rows);
+        for (index, service) in effective.iter().enumerate().skip(first).take(service_rows) {
             let marker = if index == model.selected_index {
                 term::styled_success(">")
             } else {
@@ -2267,10 +2269,25 @@ fn render_compact_watch_frame(
             &format!("{prompt}: {}", model.search_buffer),
         );
     }
+    // Keep a service row, log heading and log line reachable even when status,
+    // notices or a long service list exceed the compact terminal's height.
+    // The footer is always reserved, including while editing a search query.
+    let header_budget = height.saturating_sub(if model.show_detail { 2 } else { 5 });
+    if lines.len() > header_budget {
+        let search_prompt = matches!(model.input_mode, InputMode::Search | InputMode::LogSearch)
+            .then(|| lines.last().cloned())
+            .flatten();
+        lines.truncate(header_budget);
+        if let Some(prompt) = search_prompt
+            && let Some(last) = lines.last_mut()
+        {
+            *last = prompt;
+        }
+    }
     if model.show_help {
         // Preserve room for the service/log context and footer in constrained
         // terminals. Taller compact views progressively disclose all controls.
-        let help_budget = height.saturating_sub(lines.len() + 4);
+        let help_budget = height.saturating_sub(lines.len() + 5);
         for help in compact_help_lines(model).into_iter().take(help_budget) {
             push_fit_line(&mut lines, width, height, help);
         }
@@ -2286,7 +2303,11 @@ fn render_compact_watch_frame(
         if effective.is_empty() {
             push_fit_line(&mut lines, width, height, "  no services match filter");
         } else {
-            for (index, service) in effective.iter().enumerate() {
+            // Divide the remaining space between service navigation and logs;
+            // small service lists leave their unused rows to the log pane.
+            let service_rows = height.saturating_sub(lines.len() + 2) / 2;
+            let first = service_viewport_start(model.selected_index, effective.len(), service_rows);
+            for (index, service) in effective.iter().enumerate().skip(first).take(service_rows) {
                 let marker = if index == model.selected_index {
                     ">"
                 } else {
@@ -2377,6 +2398,12 @@ fn push_fit_line(lines: &mut Vec<String>, width: usize, height: usize, value: &s
     if lines.len() < height {
         lines.push(fit_line(value, width));
     }
+}
+
+fn service_viewport_start(selected: usize, count: usize, rows: usize) -> usize {
+    selected
+        .saturating_sub(rows.saturating_sub(1))
+        .min(count.saturating_sub(rows))
 }
 
 fn hold_indicator(hold: Option<WatchHoldState>) -> String {

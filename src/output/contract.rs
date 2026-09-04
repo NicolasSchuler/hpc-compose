@@ -475,6 +475,43 @@ mod tests {
             .expect("checked-in output schemas match generated");
     }
 
+    #[test]
+    fn effective_config_schema_accepts_omitted_empty_software_environments() {
+        let spec = hpc_compose::spec::ComposeSpec::load_with_interpolation_vars_from_str(
+            Path::new("compose.yaml"),
+            "services:\n  app:\n    image: alpine:3.20\n",
+            &std::collections::BTreeMap::new(),
+        )
+        .expect("load spec");
+        let effective = spec
+            .effective_config(
+                Path::new("/shared/cache"),
+                &std::collections::BTreeMap::new(),
+            )
+            .expect("effective config");
+        let output = serde_json::to_value(effective).expect("serialize config");
+        let schema: serde_json::Value =
+            serde_json::from_str(&output_schema_json("spec-config").expect("config schema"))
+                .expect("schema JSON");
+
+        for (instance, definition) in [
+            (&output, &schema),
+            (
+                &output["services"]["app"],
+                &schema["$defs"]["EffectiveServiceConfig"],
+            ),
+        ] {
+            assert!(instance.get("x-env").is_none());
+            for required in definition["required"].as_array().expect("required fields") {
+                let field = required.as_str().expect("field name");
+                assert!(
+                    instance.get(field).is_some(),
+                    "schema requires {field}, but config omits it: {instance}"
+                );
+            }
+        }
+    }
+
     /// Regenerates the checked-in schemas into the source tree. Ignored by
     /// default; run explicitly to re-bless after an intended contract change.
     #[test]

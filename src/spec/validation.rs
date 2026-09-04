@@ -640,6 +640,86 @@ fn value_kind(value: &Value) -> &'static str {
     }
 }
 
+/// Adds author-facing detail when an untagged string/list/map decoder failed.
+/// Called only after serde rejects the document, so successful YAML meanings
+/// (including null option values and explicit string tags) stay unchanged.
+pub(super) fn explain_authoring_type_error(
+    value: &Value,
+    path: &serde_path_to_error::Path,
+) -> Option<SpecError> {
+    use serde_path_to_error::Segment;
+
+    let mut current = value;
+    for segment in path {
+        current = match segment {
+            Segment::Map { key } => current.as_mapping()?.get(Value::String(key.clone()))?,
+            Segment::Seq { index } => current.as_sequence()?.get(*index)?,
+            _ => return None,
+        };
+    }
+    let keys = path
+        .iter()
+        .map(|segment| match segment {
+            Segment::Map { key } => Some(key.as_str()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    // Only these fields use the untagged authoring DTOs. Other `env` keys
+    // have different contracts: secret.env is a variable-name string and
+    // x-env.env is a mapping, so their serde diagnostics remain authoritative.
+    let key = match keys.as_slice() {
+        [
+            "services",
+            _,
+            key @ ("command" | "entrypoint" | "env_file" | "environment"),
+        ] => *key,
+        ["services", _, "x-runtime" | "x-enroot", "prepare", "env"] => "env",
+        _ => return None,
+    };
+    let field = path.to_string();
+    let (expected, help) = match key {
+        "command" | "entrypoint" => (
+            "a string or a list of strings",
+            "Use shell form (`command: echo hello`) or an argument list (`command: [\"echo\", \"hello\"]`). Quote numbers and booleans used as arguments, for example \"123\" or \"true\".",
+        ),
+        "env_file" => (
+            "a file path string or a list of file path strings",
+            "Use `env_file: config/app.env` or `env_file: [config/base.env, config/app.env]`. Paths are relative to the compose file's directory.",
+        ),
+        "environment" | "env" => (
+            "a mapping of string values or a list of KEY=VALUE strings",
+            "Quote environment values that YAML treats as numbers, booleans, or null, for example `COUNT: \"123\"` or `ENABLED: \"true\"`. Use `NAME: \"${NAME}\"` for interpolation, or `NAME: \"\"` for an empty value.",
+        ),
+        _ => return None,
+    };
+    let invalid = |field: String, expected: &str, value: &Value| SpecError::InvalidAuthoringType {
+        field,
+        expected: expected.to_string(),
+        got: value_kind(value).to_string(),
+        help_text: help.to_string(),
+    };
+    if let Value::Sequence(items) = current {
+        return items.iter().enumerate().find_map(|(index, item)| {
+            (!matches!(item, Value::String(_)))
+                .then(|| invalid(format!("{field}[{index}]"), "a string", item))
+        });
+    }
+    if matches!(key, "environment" | "env")
+        && let Value::Mapping(entries) = current
+    {
+        for (name, value) in entries {
+            let Some(name) = name.as_str() else {
+                return Some(invalid(field.clone(), "a mapping with string keys", name));
+            };
+            if !matches!(value, Value::String(_)) {
+                return Some(invalid(format!("{field}.{name}"), "a string", value));
+            }
+        }
+        return None;
+    }
+    Some(invalid(field, expected, current))
+}
+
 fn validate_modules_alias_conflict(scope: &str, mapping: &Mapping) -> Result<()> {
     let modules_key = Value::String("modules".into());
     let x_env_key = Value::String("x-env".into());

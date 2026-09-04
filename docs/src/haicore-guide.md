@@ -14,7 +14,7 @@ channel.
 
 ## Primary Sources
 
-- [Migration to HoreKa 2](https://www.nhr.kit.edu/userdocs/horeka2/) — transition timeline, architecture, access-model, and data-migration changes.
+- [Migration to HoreKa 2](https://docs.nhr.kit.edu/get-started/migration/) — transition timeline, architecture, access-model, and data-migration changes.
 - [HAICORE interactive login](https://www.nhr.kit.edu/userdocs/haicore/login/) — login endpoint, 2FA flow, allowed networks, and login-node boundary.
 - [HAICORE account registration](https://www.nhr.kit.edu/userdocs/haicore/registration/) — legacy FeLS registration and 2FA requirements.
 - [HAICORE batch system](https://www.nhr.kit.edu/userdocs/haicore/batch/) — legacy partitions, limits, Slurm fields, GRES names, and queue commands.

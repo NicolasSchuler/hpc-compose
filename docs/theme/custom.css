@@ -4,6 +4,44 @@
   gap: 0.6rem;
 }
 
+/* Keep links readable on dark page, table, and sidebar backgrounds. */
+:is(.navy, .coal) {
+  --links: #80c4ea;
+  --sidebar-active: #80c4ea;
+}
+
+.coal {
+  --icons: #8f9aa5;
+  --table-header-bg: #30373a;
+}
+
+.rust {
+  --links: #123a55;
+}
+
+.ayu :is(.hljs-comment, .hljs-quote) {
+  color: #8a99a8;
+}
+
+/* The inherited Tomorrow Night red falls below 4.5:1 on code blocks. */
+:is(.navy, .coal) :is(
+  .hljs-variable,
+  .hljs-attribute,
+  .hljs-attr,
+  .hljs-tag,
+  .hljs-regexp,
+  .ruby .hljs-constant,
+  .xml .hljs-tag .hljs-title,
+  .xml .hljs-pi,
+  .xml .hljs-doctype,
+  .html .hljs-doctype,
+  .css .hljs-id,
+  .css .hljs-class,
+  .css .hljs-pseudo
+) {
+  color: #d47777;
+}
+
 .hpc-compose-header-logo {
   width: 1.6rem;
   height: 1.6rem;

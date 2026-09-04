@@ -265,6 +265,14 @@ fn publish_notification(published: PublishedDiagnostics) -> Result<ServerNotific
 }
 
 fn to_lsp_diagnostic(diagnostic: &AuthoringDiagnostic) -> Diagnostic {
+    let mut message = diagnostic.message.clone();
+    if let Some(recommendation) = diagnostic.recommendation.as_deref()
+        && !recommendation.is_empty()
+        && !message.contains(recommendation)
+    {
+        message.push_str("\nHelp: ");
+        message.push_str(recommendation);
+    }
     Diagnostic {
         range: to_lsp_range(diagnostic.range),
         severity: Some(match diagnostic.severity {
@@ -274,7 +282,7 @@ fn to_lsp_diagnostic(diagnostic: &AuthoringDiagnostic) -> Diagnostic {
         code: diagnostic.code.clone().map(NumberOrString::String),
         code_description: None,
         source: Some("hpc-compose".to_string()),
-        message: diagnostic.message.clone(),
+        message,
         related_information: None,
         tags: None,
         data: Some(json!({
@@ -313,7 +321,7 @@ fn whole_document_range(text: &str) -> AuthoringRange {
     let mut character = 1_u32;
     for (index, current) in text.lines().enumerate() {
         line = index as u32;
-        character = current.chars().count().max(1) as u32;
+        character = current.encode_utf16().count().max(1) as u32;
     }
     AuthoringRange {
         start_line: 0,
@@ -485,5 +493,24 @@ services:
             serde_json::Value::Null,
         );
         assert_eq!(request.method, "shutdown");
+    }
+
+    #[test]
+    fn published_message_includes_recovery_without_duplicate_help() {
+        let mut diagnostic = unsupported_uri_diagnostic("🧪");
+        let published = to_lsp_diagnostic(&diagnostic);
+        assert!(
+            published
+                .message
+                .contains("Help: Open the compose YAML as a local file URI.")
+        );
+        assert_eq!(published.range.end.character, 2);
+        assert_eq!(
+            published.data.as_ref().expect("data")["recommendation"],
+            "Open the compose YAML as a local file URI."
+        );
+
+        diagnostic.message = published.message.clone();
+        assert_eq!(to_lsp_diagnostic(&diagnostic).message, published.message);
     }
 }

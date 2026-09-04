@@ -1355,6 +1355,7 @@ fn start_prepared_local_launch(prepared: &PreparedLocalLaunch) -> Result<LocalLa
 }
 
 fn print_local_launch_outcome(
+    context: &ResolvedContext,
     prepared: &PreparedLocalLaunch,
     outcome: &LocalLaunchOutcome,
 ) -> Result<()> {
@@ -1370,6 +1371,7 @@ fn print_local_launch_outcome(
                 &outcome.record.job_id,
                 &prepared.script_path,
                 Some(&latest_record_path(&outcome.record)),
+                &output::command_context_args(context, &outcome.record.compose_file),
             );
         }
         OutputFormat::Json => {
@@ -1516,6 +1518,7 @@ fn submit_prepared_slurm_submission(
 }
 
 fn print_slurm_submit_outcome(
+    context: &ResolvedContext,
     prepared: &PreparedSlurmSubmission,
     outcome: &SlurmSubmitOutcome,
 ) -> Result<()> {
@@ -1537,6 +1540,7 @@ fn print_slurm_submit_outcome(
                         &record.job_id,
                         &prepared.script_path,
                         Some(&meta_path),
+                        &output::command_context_args(context, &record.compose_file),
                     );
                 } else {
                     println!(
@@ -1836,7 +1840,7 @@ pub(crate) fn when(
     let outcome = submit_prepared_slurm_submission(&context, &prepared, &progress)?;
     match output_format {
         OutputFormat::Text => {
-            print_slurm_submit_outcome(&prepared, &outcome)?;
+            print_slurm_submit_outcome(&context, &prepared, &outcome)?;
         }
         OutputFormat::Json => {
             println!(
@@ -2085,6 +2089,7 @@ pub(crate) fn launch(
                         output::submit_next_commands(
                             None,
                             output::artifact_export_configured(&runtime_plan),
+                            &output::command_context_args(&context, &file),
                         ),
                     )
                 } else {
@@ -2165,6 +2170,7 @@ pub(crate) fn launch(
                     &record.job_id,
                     &script_path,
                     Some(&latest_record_path(&record)),
+                    &output::command_context_args(&context, &record.compose_file),
                 );
             }
             OutputFormat::Json => {
@@ -2174,6 +2180,7 @@ pub(crate) fn launch(
                         output::submit_next_commands(
                             Some(&record.job_id),
                             output::artifact_export_configured(&runtime_plan),
+                            &output::command_context_args(&context, &file),
                         ),
                     )
                 } else {
@@ -2236,9 +2243,10 @@ pub(crate) fn launch(
         outcome.submit_output.next_commands = output::submit_next_commands(
             outcome.submit_output.job_id.as_deref(),
             output::artifact_export_configured(&prepared.runtime_plan),
+            &output::command_context_args(&context, &prepared.file),
         );
     }
-    print_slurm_submit_outcome(&prepared, &outcome)?;
+    print_slurm_submit_outcome(&context, &prepared, &outcome)?;
     maybe_watch_slurm_submission(
         &context,
         &outcome,

@@ -184,6 +184,7 @@ pub fn watch_submission(
     let mut last_state: Option<(String, SchedulerSource)> = None;
     let mut last_visible_at: Option<u64> = None;
     let mut last_progress_minute: Option<u64> = None;
+    let mut last_queue_diagnostics = None;
 
     loop {
         let _ = drain_log_cursors(&mut cursors, &mut stdout)?;
@@ -210,6 +211,13 @@ pub fn watch_submission(
             }
             stdout.flush().ok();
             last_state = Some(state_key);
+        }
+        if queue_diagnostics != last_queue_diagnostics {
+            write_queue_diagnostics(&mut stdout, queue_diagnostics.as_ref())?;
+            stdout
+                .flush()
+                .context("failed to flush queue diagnostics")?;
+            last_queue_diagnostics = queue_diagnostics.clone();
         }
         if let Some(progress) = walltime_progress(record, &status, queue_diagnostics.as_ref(), now)
         {

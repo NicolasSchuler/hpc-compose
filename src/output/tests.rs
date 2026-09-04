@@ -947,6 +947,10 @@ fn writer_helpers_cover_status_stats_artifacts_and_verbose_inspect() {
     assert!(status_plain.contains("Scheduler:"));
     assert!(status_plain.contains("  state: COMPLETED (sacct)"));
     assert!(status_plain.contains("Service outcomes:"));
+    assert!(
+        status_plain.contains("┘\n  log  service"),
+        "the log path must start below the table: {status_plain}"
+    );
     assert!(status_plain.contains("passed"));
     assert!(status_plain.contains("  note: finished"));
     assert!(status_plain.contains("  eligible time: 2026-04-06T10:00:00"));
@@ -2387,16 +2391,16 @@ fn submit_endpoints_preserve_service_order_variants_and_original_url_bytes() {
 
 #[test]
 fn submit_next_commands_parameterizes_job_id_and_orders_pull_before_down() {
-    let with_id = submit_next_commands(Some("12345"), true);
+    let with_id = submit_next_commands(Some("12345"), true, "");
     assert_eq!(
         with_id,
         vec![
             "hpc-compose status --job-id 12345".to_string(),
-            "hpc-compose logs --follow".to_string(),
+            "hpc-compose logs --job-id 12345 --follow".to_string(),
             "hpc-compose stats --job-id 12345".to_string(),
             "hpc-compose artifacts --job-id 12345".to_string(),
             "hpc-compose pull --job-id 12345".to_string(),
-            "hpc-compose down".to_string(),
+            "hpc-compose down --job-id 12345".to_string(),
         ]
     );
     // artifacts (cluster export) and pull (laptop) both precede the destructive
@@ -2411,22 +2415,22 @@ fn submit_next_commands_parameterizes_job_id_and_orders_pull_before_down() {
         .expect("pull present");
     let down = with_id
         .iter()
-        .position(|c| c == "hpc-compose down")
+        .position(|c| c == "hpc-compose down --job-id 12345")
         .expect("down present");
     assert!(artifacts < pull, "artifacts must precede pull");
     assert!(pull < down, "pull must precede down");
 
     // Without a configured export_dir the export step is omitted (it would bail).
-    let no_export = submit_next_commands(Some("12345"), false);
+    let no_export = submit_next_commands(Some("12345"), false, "");
     assert!(
         no_export
             .iter()
-            .all(|c| !c.starts_with("hpc-compose artifacts")),
+            .all(|c| !c.starts_with("hpc-compose artifacts") && !c.starts_with("hpc-compose pull")),
         "artifacts hint must be gated on a configured export_dir: {no_export:?}"
     );
 
     // Without a job id, no --job-id is appended to any suggestion.
-    let without_id = submit_next_commands(None, true);
+    let without_id = submit_next_commands(None, true, "");
     assert!(without_id.iter().all(|c| !c.contains("--job-id")));
     assert!(without_id.contains(&"hpc-compose status".to_string()));
     assert!(without_id.contains(&"hpc-compose artifacts".to_string()));
@@ -2440,7 +2444,7 @@ fn print_next_steps_is_noop_when_empty() {
 
 #[test]
 fn inspect_next_commands_omit_status_and_parameterize_job_id() {
-    let cmds = inspect_next_commands(Some("777"), true);
+    let cmds = inspect_next_commands(Some("777"), true, "");
     assert!(
         cmds.iter().all(|c| !c.starts_with("hpc-compose status")),
         "inspect hints must not re-suggest status: {cmds:?}"
@@ -2448,11 +2452,12 @@ fn inspect_next_commands_omit_status_and_parameterize_job_id() {
     assert!(cmds.contains(&"hpc-compose stats --job-id 777".to_string()));
     assert!(cmds.contains(&"hpc-compose artifacts --job-id 777".to_string()));
     assert!(cmds.contains(&"hpc-compose pull --job-id 777".to_string()));
-    assert!(cmds.contains(&"hpc-compose down".to_string()));
+    assert!(cmds.contains(&"hpc-compose logs --job-id 777 --follow".to_string()));
+    assert!(cmds.contains(&"hpc-compose down --job-id 777".to_string()));
     assert!(
-        inspect_next_commands(Some("777"), false)
+        inspect_next_commands(Some("777"), false, "")
             .iter()
-            .all(|c| !c.starts_with("hpc-compose artifacts")),
+            .all(|c| !c.starts_with("hpc-compose artifacts") && !c.starts_with("hpc-compose pull")),
         "artifacts hint must be gated on a configured export_dir"
     );
 }
@@ -2460,7 +2465,7 @@ fn inspect_next_commands_omit_status_and_parameterize_job_id() {
 #[test]
 fn spec_next_commands_preserve_the_checked_compose_file() {
     let file = Path::new("/tmp/hpc compose/demo'spec.yaml");
-    let validate = validate_next_commands(Some(file));
+    let validate = validate_next_commands(Some(file), "");
     assert_eq!(
         validate,
         vec![
@@ -2471,14 +2476,14 @@ fn spec_next_commands_preserve_the_checked_compose_file() {
         ]
     );
 
-    let ready = ready_to_run_next_commands(Some(file));
+    let ready = ready_to_run_next_commands(Some(file), "");
     assert_eq!(
         ready,
         vec!["hpc-compose up -f '/tmp/hpc compose/demo'\\''spec.yaml' # submits one Slurm job and may consume quota".to_string()]
     );
 
     assert_eq!(
-        validate_next_commands(None),
+        validate_next_commands(None, ""),
         vec![
             "hpc-compose plan".to_string(),
             "hpc-compose preflight".to_string(),
@@ -2501,7 +2506,7 @@ fn display_shell_quote_and_exact_spec_hints_preserve_conditional_quoting() {
 
     let file = Path::new("/tmp/team dir/demo'spec.yaml");
     assert_eq!(
-        validate_next_commands(Some(file)),
+        validate_next_commands(Some(file), ""),
         vec![
             "hpc-compose plan -f '/tmp/team dir/demo'\\''spec.yaml'".to_string(),
             "hpc-compose preflight -f '/tmp/team dir/demo'\\''spec.yaml'".to_string(),
@@ -2510,7 +2515,7 @@ fn display_shell_quote_and_exact_spec_hints_preserve_conditional_quoting() {
         ]
     );
     assert_eq!(
-        ready_to_run_next_commands(Some(file)),
+        ready_to_run_next_commands(Some(file), ""),
         vec!["hpc-compose up -f '/tmp/team dir/demo'\\''spec.yaml' # submits one Slurm job and may consume quota".to_string()]
     );
 }

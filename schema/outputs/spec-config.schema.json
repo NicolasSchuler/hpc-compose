@@ -38,7 +38,6 @@
   },
   "required": [
     "runtime",
-    "x-env",
     "x-slurm",
     "services"
   ],
@@ -430,7 +429,6 @@
         }
       },
       "required": [
-        "x-env",
         "x-slurm"
       ]
     },

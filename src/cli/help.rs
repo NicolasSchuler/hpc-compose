@@ -104,6 +104,15 @@ Debug failed run:
 
 const TOP_LEVEL_HELP_FOOTER: &str = "Use `hpc-compose help <command>` for command details.";
 
+const AUTHORING_COMMAND_GUIDE: &str = "\
+Choose an authoring command:
+  validate / lint    Check legal YAML / flag risky but valid choices
+  config / context   Show effective YAML / settings, paths, and variable sources
+  plan / inspect     Preview execution / inspect normalized services and mounts
+  render / explain   Preview the batch script / trace script lines to YAML fields
+  preflight          Check prerequisites on the submission host
+  up --dry-run       Preview submission without launching a job";
+
 /// Renders the `Workflow groups:` block from [`WORKFLOW_GROUPS`]. Each group
 /// shows a one-line purpose so the listing answers "which area?" at a glance,
 /// then its commands; drill in with `hpc-compose help <command>` for per-command
@@ -136,7 +145,7 @@ fn workflow_group_command_label(name: &str) -> &str {
 /// actual command set (guarded by `tests::workflow_groups_match_every_command_exactly_once`).
 pub(super) fn top_level_help() -> String {
     format!(
-        "{TOP_LEVEL_HELP_PREAMBLE}\n\n{}\n\n{TOP_LEVEL_HELP_FOOTER}",
+        "{TOP_LEVEL_HELP_PREAMBLE}\n\n{AUTHORING_COMMAND_GUIDE}\n\n{}\n\n{TOP_LEVEL_HELP_FOOTER}",
         workflow_groups_block()
     )
 }
@@ -214,7 +223,11 @@ Examples:
 pub(super) const CONFIG_HELP: &str = "\
 Examples:
   hpc-compose config -f compose.yaml
-  hpc-compose config -f compose.yaml --format json";
+  hpc-compose config -f compose.yaml --format json
+  hpc-compose config -f compose.yaml --variables
+
+Use config for effective YAML, config --variables for interpolation sources,
+and context for settings/profile selection and resolved paths.";
 
 pub(super) const SCHEMA_HELP: &str = "\
 Examples:
@@ -228,7 +241,11 @@ Examples:
   hpc-compose plan --explain -f compose.yaml
   hpc-compose plan --show-script -f compose.yaml
   hpc-compose plan --show-script --annotate -f compose.yaml
-  hpc-compose plan -f compose.yaml --format json";
+  hpc-compose plan -f compose.yaml --format json
+
+plan --explain adds operational hints. The separate explain command maps
+generated script lines to YAML fields; inspect --verbose shows normalized
+service details and mounts. These authoring views do not check runtime tools.";
 
 pub(super) const UP_HELP: &str = "\
 Examples:
@@ -703,6 +720,7 @@ const INSPECT_EXAMPLES: &[&str] = &[
 const CONFIG_EXAMPLES: &[&str] = &[
     "hpc-compose config -f compose.yaml",
     "hpc-compose config -f compose.yaml --format json",
+    "hpc-compose config -f compose.yaml --variables",
 ];
 
 const SCHEMA_EXAMPLES: &[&str] = &[
@@ -1117,10 +1135,10 @@ mod tests {
     #[test]
     fn next_step_hints_reference_only_real_commands() {
         let real = real_top_level_commands();
-        let mut hints = crate::output::submit_next_commands(Some("123"), true);
-        hints.extend(crate::output::inspect_next_commands(Some("123"), true));
-        hints.extend(crate::output::validate_next_commands(None));
-        hints.extend(crate::output::ready_to_run_next_commands(None));
+        let mut hints = crate::output::submit_next_commands(Some("123"), true, "");
+        hints.extend(crate::output::inspect_next_commands(Some("123"), true, ""));
+        hints.extend(crate::output::validate_next_commands(None, ""));
+        hints.extend(crate::output::ready_to_run_next_commands(None, ""));
         for hint in hints {
             // Each hint is "hpc-compose <command> ...".
             let command = hint

@@ -43,7 +43,8 @@ pub(crate) enum AuthoringSeverity {
     Warning,
 }
 
-/// Zero-based source range in the diagnosed document.
+/// Zero-based source range in the diagnosed document, using UTF-16 code units
+/// for character offsets as required by the LSP's default position encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AuthoringRange {
     pub(crate) start_line: u32,
@@ -360,7 +361,7 @@ fn blocking_error(error: Error, index: &YamlPathIndex) -> AuthoringDiagnostic {
         .or_else(|| phase_error.map(|error| error.recommendation.to_string()));
     AuthoringDiagnostic {
         severity: AuthoringSeverity::Error,
-        message: error.to_string(),
+        message: error_message(&error),
         code,
         field: field.clone(),
         recommendation,
@@ -368,10 +369,25 @@ fn blocking_error(error: Error, index: &YamlPathIndex) -> AuthoringDiagnostic {
     }
 }
 
+fn error_message(error: &Error) -> String {
+    let mut messages = Vec::new();
+    for cause in error.chain() {
+        let message = cause.to_string();
+        // Phase and validation wrappers can repeat their source's display.
+        // Keep the underlying parser or deserializer reason without echoing
+        // identical wrapper messages in an editor's diagnostic popup.
+        if messages.last() != Some(&message) {
+            messages.push(message);
+        }
+    }
+    messages.join(": ")
+}
+
 fn spec_error_field_path(error: &SpecError) -> Option<String> {
     match error {
         SpecError::MissingServices => Some("services".to_string()),
         SpecError::InvalidFieldType { field, .. } => Some(scope_to_field_path(field)),
+        SpecError::InvalidAuthoringType { field, .. } => Some(field.clone()),
         SpecError::UnsupportedServiceKey { scope, key, .. } => {
             let scope = scope_to_field_path(scope);
             if scope == "root" {
@@ -429,7 +445,7 @@ fn spec_error_field_path(error: &SpecError) -> Option<String> {
         | SpecError::EmptyField { field } => Some(field.clone()),
         SpecError::GpusGresConflict { scope } => Some(scope_to_field_path(scope)),
         SpecError::ArrayTasksRequiresArray => Some("x-slurm.notify.email.on".to_string()),
-        SpecError::RequiredVariableUnset { .. } => None,
+        SpecError::RequiredVariableUnset { .. } | SpecError::MissingVariable { .. } => None,
         SpecError::SpecFileNotFound { .. } | SpecError::LoadFailed { .. } => None,
     }
 }
@@ -517,6 +533,7 @@ fn stack_path_including_equal_indent(stack: &[StackEntry], indent: usize) -> Vec
 }
 
 fn line_range(line_no: usize, start: usize, line: &str) -> AuthoringRange {
+    let start = character_count(&line[..start]);
     AuthoringRange {
         start_line: line_no as u32,
         start_character: start as u32,
@@ -526,7 +543,7 @@ fn line_range(line_no: usize, start: usize, line: &str) -> AuthoringRange {
 }
 
 fn character_count(line: &str) -> usize {
-    line.chars().count()
+    line.encode_utf16().count()
 }
 
 #[cfg(test)]
@@ -681,6 +698,44 @@ services:
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].severity, AuthoringSeverity::Error);
         assert_eq!(diagnostics[0].code.as_deref(), Some(CODE_LOAD));
+        assert!(diagnostics[0].message.contains("failed to parse YAML"));
+        assert!(diagnostics[0].message.contains("expected node content"));
+        assert!(diagnostics[0].message.contains("line 3 column 1"));
+        assert_eq!(
+            diagnostics[0]
+                .message
+                .matches("failed to parse YAML")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn invalid_scalar_preserves_expected_type_in_diagnostic() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let diagnostics = diagnose_document(
+            &tmp.path().join("compose.yaml"),
+            "services:\n  app:\n    image: alpine\n    x-slurm:\n      cpus_per_task: many\n",
+            &options(tmp.path()),
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0]
+                .message
+                .contains("services.app.x-slurm.cpus_per_task")
+        );
+        assert!(diagnostics[0].message.contains("expected u32"));
+    }
+
+    #[test]
+    fn yaml_ranges_count_utf16_code_units() {
+        let text = "services:\n  app:\n    image: alpine\n    ports: [] # 🧪";
+        let index = YamlPathIndex::new(text);
+        let range = index.range_for_field(Some("services.app.ports"));
+        assert_eq!(range.start_character, 4);
+        assert_eq!(range.end_character, 18);
+        assert_eq!(index.range_for_field(None).end_character, 18);
     }
 
     #[test]

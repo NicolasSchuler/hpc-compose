@@ -2176,12 +2176,71 @@ fn render_watch_frame_compact_snapshot_stays_stable() {
     assert_anchored_line(&lines, "hpc-compose watch", "hpc-compose watch | job 12345");
     assert_anchored_line(&lines, "filter: api", "filter: api");
     assert_anchored_line(&lines, "filter input:", "filter input: api");
-    assert_anchored_line(&lines, "j/k service", "j/k service | Enter detail | q quit");
     assert_anchored_line(&lines, "> api", "> api OK ready=yes");
-    // Exact height is load-bearing here: the compact layout must pack the whole
-    // UI (header, filter block, one service row, log title, footer) into exactly
-    // the 9 rows requested, with no blank padding or overflow.
+    assert_anchored_line(&lines, "logs:", "logs: api FOLLOW");
+    assert!(lines.iter().any(|line| line == "tail"));
+    assert!(
+        lines
+            .last()
+            .is_some_and(|line| line.contains("Enter apply"))
+    );
+    // At this height optional help yields to the selected service, log content,
+    // and search controls. Previously the help line displaced the footer.
     assert_eq!(lines.len(), 9);
+}
+
+#[test]
+fn render_watch_frame_keeps_selected_service_and_logs_visible_with_many_services() {
+    let mut model = sample_watch_model();
+    let service = model.snapshot.services[0].clone();
+    model.snapshot.services = (0..30)
+        .map(|index| {
+            let mut row = service.clone();
+            row.service_name = format!("service-{index:02}");
+            row
+        })
+        .collect();
+    model.log_lines = vec!["selected service log tail".into()];
+
+    for (width, height) in [(80, 24), (40, 24), (80, 8), (120, 24), (160, 50)] {
+        for selected in [0, 14, 29] {
+            model.selected_index = selected;
+            let frame = render_watch_frame(&model, width, height);
+            let lines = canonical_frame_lines(&frame);
+            let selected_row = format!("> service-{selected:02}");
+            assert!(
+                lines.iter().any(|line| line.starts_with(&selected_row)),
+                "{width}x{height}: {frame}"
+            );
+            assert!(
+                frame.contains("selected service log tail"),
+                "{width}x{height}: {frame}"
+            );
+            assert!(lines.last().is_some_and(|line| line.contains("q quit")));
+            assert!(lines.len() <= height);
+            assert!(frame.lines().all(|line| visible_width(line) <= width));
+        }
+    }
+}
+
+#[test]
+fn compact_watch_keeps_recovery_controls_when_status_details_fill_the_header() {
+    let mut model = sample_watch_model();
+    model.metrics_line = Some("metrics unavailable".into());
+    model.notice = Some("status notice".into());
+    model.snapshot.scheduler.detail = Some("scheduler detail".into());
+    model.hold_state = Some(WatchHoldState { failed: true });
+    model.log_lines = vec!["failure log tail".into()];
+    let frame = render_watch_frame(&model, 80, 8);
+    assert!(frame.contains("> api"));
+    assert!(frame.contains("failure log tail"));
+    assert!(
+        frame
+            .lines()
+            .last()
+            .is_some_and(|line| line.contains("q exit"))
+    );
+    assert_eq!(frame.lines().count(), 8);
 }
 
 #[test]

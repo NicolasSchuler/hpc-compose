@@ -149,6 +149,11 @@ below omits `Content-Length` headers and most `initialize` fields for brevity:
 
 `RUST_LOG` is honored by the internal tracing subscriber and takes precedence over the default filters selected by `-v`/`--debug`. User-facing warnings are still written through hpc-compose's diagnostic notice channel; when a command writes machine-readable JSON to stdout, warnings on stderr are emitted as one JSON object per line using the checked-in `diagnostic-notice` output schema.
 
+Editor diagnostics include the underlying parser reason and available recovery
+guidance in their visible message. Agents can also read the unchanged
+`Diagnostic.data.field` and `Diagnostic.data.recommendation` fields. Ranges use
+LSP's default UTF-16 positions, including lines containing emoji.
+
 ## Plan and Run
 
 | Command | Use it for | Notes |
@@ -643,7 +648,7 @@ hpc-compose logs -f compose.yaml --grep 'error|oom' --since 30m
 hpc-compose status -f compose.yaml --format json
 ```
 
-`context` and `config --variables` intentionally scope interpolation variables to names referenced by the compose file. Values whose names look secret-bearing are shown as `<redacted>` by default; add `--show-values` only in trusted local diagnostics. A name triggers redaction when, after upper-casing, it **contains** any of these case-insensitive substrings: `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD`, `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY`, `CREDENTIAL`, `AUTH`, `COOKIE`, `SESSION`, `BEARER`. Because the test is a substring match, names such as `SESSION_DIR` or `AUTH_MODE` also match.
+`context` and `config --variables` intentionally scope interpolation variables to names referenced by the effective compose file, including inherited fields after `extends` merges and overrides. Values whose names look secret-bearing are shown as `<redacted>` by default; add `--show-values` only in trusted local diagnostics. A name triggers redaction when, after upper-casing, it **contains** any of these case-insensitive substrings: `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD`, `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY`, `CREDENTIAL`, `AUTH`, `COOKIE`, `SESSION`, `BEARER`. Because the test is a substring match, names such as `SESSION_DIR` or `AUTH_MODE` also match.
 
 ## Tracked Runtime
 
